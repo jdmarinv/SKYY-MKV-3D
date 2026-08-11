@@ -1,0 +1,38 @@
+# Android and Gradle
+.gradle/
+**/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE and operating system
+.idea/
+.vscode/
+.DS_Store
+*.iml
+
+# Generated packages and media
+*.apk
+*.aab
+*.apks
+*.mkv
+*.mp4
+*.rar
+*.dmg
+
+# Local research, backups, and unrelated workspaces
+/Movies/
+/analysis/
+/brave-browser-metadata/
+/build-dashboard/
+/skyy-firefox/
+/skyy-free-browser/
+/weblibre-skyy/
+/recibo-fecha-31-julio.png
+/com.android.future.video_1.0.1.apk
+/com.innovate.cinema_1.2.apk
+/com.wztech.service3d_3.5.201812182.apk
+
+# Unused local prototype retained only for historical reference
+/app/src/main/java/com/iqh3d/geoexplorer/StereoShapeView.java

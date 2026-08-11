@@ -1,0 +1,40 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.iqh3d.geoexplorer"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.iqh3d.geoexplorer"
+        minSdk 26
+        targetSdk 28
+        versionCode 21
+        versionName "1.0.0"
+
+        ndk {
+            abiFilters "armeabi-v7a"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    lint {
+        disable "ExpiredTargetSdkVersion"
+    }
+}
+
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.aar', '*.jar'])
+    implementation 'androidx.media3:media3-exoplayer:1.4.1'
+    implementation 'androidx.media3:media3-ui:1.4.1'
+    implementation 'androidx.media3:media3-extractor:1.4.1'
+    implementation 'androidx.media3:media3-common:1.4.1'
+    implementation 'org.videolan.android:libvlc-all:3.6.5'
+}
