@@ -10,7 +10,7 @@ SKYY MKV 3D is an Android player built specifically for the IQH3D SKYY autostere
 
 The application does not recreate lenticular interlacing, replace `com.wztech.service3d`, clear its data, or use its legacy HTTP updater.
 
-The current version is `1.1.0` (`versionCode 22`). The application and this documentation are entirely in English.
+The current version is `1.1.4` (`versionCode 26`).
 
 ## Features
 
@@ -26,6 +26,8 @@ The current version is `1.1.0` (`versionCode 22`). The application and this docu
 - Native 3DFV parallax adjustment and eye tracking.
 - Full-SBS normalization to prevent a small, narrow, or double-scaled image.
 - Timeline, elapsed time, duration, pause, play, and 10-second seek controls.
+- Runtime audio-track selection for multilingual and multichannel videos.
+- Automatic playback-position memory for local and SMB videos.
 - Controls inspired by the ergonomics of MX Player Pro, using only original code and assets.
 - ARM32 output for `armeabi-v7a`.
 
@@ -55,7 +57,7 @@ flowchart TD
     F --> G[Video decode and PCM audio]
     G --> H[VLC SurfaceView]
     I[SMB connection form] --> J[SMBJ browser]
-    J --> K[Safe smb URI and in-memory credentials]
+    J --> K[Safe smb URI and encrypted saved credentials]
     K --> D
     E --> L[Native 2560x1600 buffer]
     H --> L
@@ -78,8 +80,7 @@ flowchart TD
 
 ## Why Two Playback Engines Are Used
 
-Media3 provides a clean Android playback path, but the SKYY firmware cannot decode every audio format commonly found in MKV files. During physical testing, some AC3 and E-AC3 files produced video without audio. MX Player Pro on the same tablet also reported unsupported E-AC3 audio.
-
+Media3 provides a clean Android playback path, but the SKYY firmware cannot decode every audio format commonly found in MKV files. During physical testing, some AC3 and E-AC3 files produced video without audio.
 The reliable local MKV path is:
 
 1. Open the selected `content://` URI with `ContentResolver.openFileDescriptor()`.
@@ -263,8 +264,11 @@ The browser shows folders and supported video files. Selecting a file sends a sa
 ### Credential Handling
 
 - The host, share, starting path, username, domain, and anonymous setting are saved for convenience.
-- The password is never written to `SharedPreferences`, logs, the URI, or the repository.
-- Password characters are held in memory only while browsing or playing the selected remote file.
+- The password is encrypted with AES-GCM before its ciphertext and random IV are written to private `SharedPreferences`.
+- The encryption key is non-exportable and remains in Android Keystore on the tablet.
+- The password is restored automatically for the saved SMB connection.
+- Application-data backup is disabled so encrypted credentials cannot be restored without their Keystore key.
+- Decrypted password characters are held in memory only while editing, browsing, or playing the selected remote file.
 - Password buffers are cleared when another file is selected, when the dialog closes, or when the Activity is destroyed.
 - The visible URI never embeds `username:password@host`.
 
@@ -287,7 +291,19 @@ SMBJ directory browsing caps anonymous sessions at SMB2.1 because anonymous SMB3
 | macOS File Sharing | Mac IP address | Published share name | Account-specific |
 | Nonstandard port | `192.168.1.30:1445` | `media` | Server-specific |
 
-The application does not perform automatic server or share discovery in version `1.1.0`; enter the server and share explicitly.
+The application does not perform automatic server or share discovery in version `1.1.4`; enter the server and share explicitly.
+
+## Playback Resume
+
+The player remembers progress independently for each local or SMB video. Media identities are stored as SHA-256 hashes, so the playback-position database does not expose local content URIs, SMB paths, or credentials.
+
+- Progress is saved every 10 seconds while playing.
+- Progress is also saved when pausing, leaving the Activity, or changing files.
+- Reopening the same video displays a non-dismissible choice to `RESUME` from the restored timestamp or `START OVER` from `00:00`.
+- Choosing `START OVER` removes the old saved position for that video.
+- Positions below 5 seconds are ignored.
+- Positions within 15 seconds of the end are removed so completed videos restart from the beginning.
+- SMB resume uses the safe media URI only; passwords remain in the separate Keystore-backed credential store.
 
 ## Player Interface
 
@@ -295,6 +311,7 @@ The interface is entirely in English and follows a tablet-oriented media player 
 
 - File name and active playback engine in the header.
 - `OPEN`, `SMB`, `AUDIO`, and `3D` actions.
+- An `AUDIO` selector showing the active track plus available language, channel layout, and codec metadata.
 - Cyan playback timeline.
 - Elapsed time on the left and duration on the right.
 - `-10`, `PLAY/PAUSE`, and `+10` controls.
@@ -389,7 +406,7 @@ The current `release` build is signed with the local debug key so development bu
 
 Before commercial distribution, create a private release keystore, store it outside the repository, and configure Gradle through environment variables or an untracked local file. Never commit a private signing key.
 
-The validated `1.1.0` APK uses APK Signature Scheme v2.
+The validated `1.1.4` APK uses APK Signature Scheme v2.
 
 ## Install and Launch
 
@@ -409,8 +426,8 @@ adb shell dumpsys package com.iqh3d.geoexplorer | grep -E 'versionCode|versionNa
 Expected result:
 
 ```text
-versionCode=22
-versionName=1.1.0
+versionCode=26
+versionName=1.1.4
 ```
 
 ## Validate the ARM32 ABI
@@ -435,6 +452,9 @@ lib/armeabi-v7a/libvlc.so
 | Full-SBS `3840x800` + Full SBS | Transport is normalized to `12:5`. |
 | Top/Bottom + Top/Bottom | Correct vertical stereoscopic fusion. |
 | MKV with AC3/E-AC3 | LibVLC is active and decoded PCM is audible. |
+| Multilingual MKV | `AUDIO` lists the tracks and changes language without restarting playback. |
+| Local playback resume | Reopening the same local video offers `RESUME` and `START OVER`. |
+| SMB playback resume | Reopening the same SMB video offers `RESUME` and `START OVER` before opening the stream. |
 | Playback timeline | Time advances and dragging the timeline changes position. |
 | `-10` and `+10` | Seek remains between zero and total duration. |
 | Automatic hiding | Controls disappear after five seconds. |
@@ -448,7 +468,7 @@ lib/armeabi-v7a/libvlc.so
 | 3DFV panel | Native selector shows Normal, Half SBS, Full SBS, Top/Bottom, and parallax. |
 | Eye tracking | Lenticular fusion follows the viewer on the physical display. |
 
-Left/right eye swapping is not implemented inside the player in version `1.1.0`. If a file is reversed, correct it at the source or use a firmware mode that provides eye-order control, if available.
+Left/right eye swapping is not implemented inside the player in version `1.1.4`. If a file is reversed, correct it at the source or use a firmware mode that provides eye-order control, if available.
 
 Lenticular fusion and eye tracking must be confirmed by looking at the physical screen. An ADB screenshot contains the packed source frame and cannot prove the final optical effect.
 
@@ -566,7 +586,7 @@ The overlay confirms Activity recognition, not optical calibration. Verify:
 
 ## Known Limitations
 
-- Left/right eye swapping is not implemented inside the player in `1.1.0`.
+- Left/right eye swapping is not implemented inside the player in `1.1.4`.
 - Full Top/Bottom detection currently depends partly on filename patterns.
 - SMB server/share discovery is not implemented; users enter both values explicitly.
 - Remote metadata is available only after LibVLC begins decoding the stream.
@@ -591,6 +611,10 @@ The overlay confirms Activity recognition, not optical calibration. Verify:
 13. Added SMBJ-based SMB2/SMB3 browsing and LibVLC network playback.
 14. Added in-memory-only SMB password handling and lifecycle cleanup.
 15. Updated the application to `1.1.0` (`versionCode 22`).
+16. Added runtime audio-track selection and updated the application to `1.1.1` (`versionCode 23`).
+17. Added Android Keystore-backed SMB password persistence and updated the application to `1.1.2` (`versionCode 24`).
+18. Added automatic local and SMB playback resume and updated the application to `1.1.3` (`versionCode 25`).
+19. Added a resume-or-start-over prompt and updated the application to `1.1.4` (`versionCode 26`).
 
 ## Upstream Projects
 

@@ -1,7 +1,9 @@
 package com.iqh3d.geoexplorer;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.database.Cursor;
 import android.graphics.Typeface;
@@ -12,6 +14,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import android.provider.OpenableColumns;
 import android.util.Log;
 import android.view.Gravity;
@@ -29,9 +32,11 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.media3.common.C;
+import androidx.media3.common.Format;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
+import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.Tracks;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
@@ -44,12 +49,20 @@ import org.videolan.libvlc.MediaPlayer;
 import org.videolan.libvlc.interfaces.IMedia;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 public final class MainActivity extends Activity {
     private static final String TAG = "SkyyMkvPlayer";
     private static final int PICK_VIDEO = 1001;
+    private static final String PLAYBACK_PREFS = "playback_positions";
+    private static final long MIN_RESUME_POSITION_MS = 5_000L;
+    private static final long COMPLETION_MARGIN_MS = 15_000L;
+    private static final long POSITION_SAVE_INTERVAL_MS = 10_000L;
 
     private PlayerView playerView;
     private ExoPlayer exoPlayer;
@@ -85,6 +98,8 @@ public final class MainActivity extends Activity {
     private int surfaceWidth;
     private int surfaceHeight;
     private boolean userSeeking;
+    private String activePlaybackKey;
+    private long lastPositionSaveElapsedMs;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -133,6 +148,13 @@ public final class MainActivity extends Activity {
                     hideChromeSoon();
                 } else {
                     showChrome();
+                }
+            }
+
+            @Override
+            public void onPlaybackStateChanged(int playbackState) {
+                if (!usingVlc && playbackState == Player.STATE_ENDED) {
+                    clearActivePlaybackPosition();
                 }
             }
         });
@@ -228,8 +250,7 @@ public final class MainActivity extends Activity {
 
         TextView open = createTextControl("OPEN", 13f, v -> pickVideo());
         TextView network = createTextControl("SMB", 13f, v -> openSmbBrowser());
-        TextView audio = createTextControl("AUDIO", 13f, v -> Toast.makeText(this,
-                usingVlc ? "VLC/PCM audio active" : "Media3 audio active", Toast.LENGTH_SHORT).show());
+        TextView audio = createTextControl("AUDIO", 13f, v -> showAudioTrackSelector());
         TextView mode = createTextControl("3D", 13f, v -> Toast.makeText(this,
                 "Use the 3DFV selector on the left edge", Toast.LENGTH_SHORT).show());
         topBar.addView(open, new LinearLayout.LayoutParams(dp(88), dp(54)));
@@ -420,6 +441,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        saveActivePlaybackPosition();
         uiHandler.removeCallbacksAndMessages(null);
         if (exoPlayer != null) {
             exoPlayer.release();
@@ -503,22 +525,277 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void showAudioTrackSelector() {
+        showChrome();
+        uiHandler.removeCallbacks(hideChromeRunnable);
+        if (pendingUri == null) {
+            Toast.makeText(this, "Open a video first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (usingVlc) {
+            showVlcAudioTrackSelector();
+        } else {
+            showMedia3AudioTrackSelector();
+        }
+    }
+
+    private void showVlcAudioTrackSelector() {
+        if (vlcPlayer == null || !vlcPlayer.hasMedia()) {
+            Toast.makeText(this, "Audio tracks are not available yet", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        MediaPlayer.TrackDescription[] tracks = vlcPlayer.getAudioTracks();
+        if (tracks == null || tracks.length == 0) {
+            Toast.makeText(this, "No audio tracks found", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String[] labels = new String[tracks.length];
+        int selectedIndex = -1;
+        int activeTrackId = vlcPlayer.getAudioTrack();
+        for (int index = 0; index < tracks.length; index++) {
+            MediaPlayer.TrackDescription track = tracks[index];
+            labels[index] = buildVlcAudioLabel(track, index);
+            if (track.id == activeTrackId) {
+                selectedIndex = index;
+            }
+        }
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Audio track")
+                .setSingleChoiceItems(labels, selectedIndex, null)
+                .setNegativeButton("CANCEL", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getListView().setOnItemClickListener(
+                (parent, view, position, id) -> {
+                    MediaPlayer.TrackDescription track = tracks[position];
+                    if (vlcPlayer.setAudioTrack(track.id)) {
+                        Toast.makeText(this, "Audio: " + labels[position], Toast.LENGTH_SHORT).show();
+                        Log.i(TAG, "Selected VLC audio track " + track.id + ": " + labels[position]);
+                    } else {
+                        Toast.makeText(this, "Could not change the audio track", Toast.LENGTH_LONG).show();
+                    }
+                    dialog.dismiss();
+                }));
+        dialog.setOnDismissListener(ignored -> resumeChromeTimeout());
+        dialog.show();
+    }
+
+    private String buildVlcAudioLabel(MediaPlayer.TrackDescription description, int index) {
+        if (description.id < 0) {
+            return "Audio off";
+        }
+        String name = cleanTrackText(description.name);
+        String language = null;
+        int channels = 0;
+        String codec = null;
+        IMedia media = vlcPlayer.getMedia();
+        if (media != null) {
+            try {
+                for (int trackIndex = 0; trackIndex < media.getTrackCount(); trackIndex++) {
+                    IMedia.Track mediaTrack = media.getTrack(trackIndex);
+                    if (mediaTrack instanceof IMedia.AudioTrack && mediaTrack.id == description.id) {
+                        IMedia.AudioTrack audioTrack = (IMedia.AudioTrack) mediaTrack;
+                        language = displayLanguage(audioTrack.language);
+                        channels = audioTrack.channels;
+                        codec = cleanTrackText(audioTrack.codec);
+                        if (name == null) {
+                            name = cleanTrackText(audioTrack.description);
+                        }
+                        break;
+                    }
+                }
+            } finally {
+                media.release();
+            }
+        }
+        if (name == null) {
+            name = "Track " + (index + 1);
+        }
+        return joinTrackDetails(name, language, channelLabel(channels), codec);
+    }
+
+    private void showMedia3AudioTrackSelector() {
+        List<Media3AudioChoice> choices = new ArrayList<>();
+        int selectedIndex = -1;
+        for (Tracks.Group group : exoPlayer.getCurrentTracks().getGroups()) {
+            if (group.getType() != C.TRACK_TYPE_AUDIO) {
+                continue;
+            }
+            for (int trackIndex = 0; trackIndex < group.length; trackIndex++) {
+                if (!group.isTrackSupported(trackIndex)) {
+                    continue;
+                }
+                Format format = group.getTrackFormat(trackIndex);
+                choices.add(new Media3AudioChoice(group, trackIndex, buildMedia3AudioLabel(format,
+                        choices.size())));
+                if (group.isTrackSelected(trackIndex)) {
+                    selectedIndex = choices.size() - 1;
+                }
+            }
+        }
+        if (choices.isEmpty()) {
+            Toast.makeText(this, "No selectable audio tracks found", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String[] labels = new String[choices.size()];
+        for (int index = 0; index < choices.size(); index++) {
+            labels[index] = choices.get(index).label;
+        }
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Audio track")
+                .setSingleChoiceItems(labels, selectedIndex, null)
+                .setNegativeButton("CANCEL", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getListView().setOnItemClickListener(
+                (parent, view, position, id) -> {
+                    Media3AudioChoice choice = choices.get(position);
+                    exoPlayer.setTrackSelectionParameters(exoPlayer.getTrackSelectionParameters()
+                            .buildUpon()
+                            .setOverrideForType(new TrackSelectionOverride(
+                                    choice.group.getMediaTrackGroup(), choice.trackIndex))
+                            .build());
+                    Toast.makeText(this, "Audio: " + choice.label, Toast.LENGTH_SHORT).show();
+                    Log.i(TAG, "Selected Media3 audio track: " + choice.label);
+                    dialog.dismiss();
+                }));
+        dialog.setOnDismissListener(ignored -> resumeChromeTimeout());
+        dialog.show();
+    }
+
+    private String buildMedia3AudioLabel(Format format, int index) {
+        String name = cleanTrackText(format.label);
+        if (name == null) {
+            name = "Track " + (index + 1);
+        }
+        String codec = cleanTrackText(format.codecs);
+        if (codec == null) {
+            codec = cleanTrackText(format.sampleMimeType);
+            if (codec != null && codec.startsWith("audio/")) {
+                codec = codec.substring("audio/".length());
+            }
+        }
+        return joinTrackDetails(name, displayLanguage(format.language),
+                channelLabel(format.channelCount), codec);
+    }
+
+    private String joinTrackDetails(String name, String language, String channels, String codec) {
+        StringBuilder label = new StringBuilder(name);
+        appendTrackDetail(label, language);
+        appendTrackDetail(label, channels);
+        appendTrackDetail(label, codec);
+        return label.toString();
+    }
+
+    private void appendTrackDetail(StringBuilder label, String detail) {
+        if (detail != null && !detail.isEmpty()
+                && !label.toString().toLowerCase(Locale.US).contains(detail.toLowerCase(Locale.US))) {
+            label.append("  |  ").append(detail);
+        }
+    }
+
+    private String displayLanguage(String languageCode) {
+        String cleaned = cleanTrackText(languageCode);
+        if (cleaned == null || "und".equalsIgnoreCase(cleaned)) {
+            return null;
+        }
+        String displayName = Locale.forLanguageTag(cleaned.replace('_', '-'))
+                .getDisplayLanguage(Locale.ENGLISH);
+        return displayName.isEmpty() ? cleaned : displayName;
+    }
+
+    private String channelLabel(int channels) {
+        if (channels <= 0) {
+            return null;
+        }
+        if (channels == 1) {
+            return "Mono";
+        }
+        if (channels == 2) {
+            return "Stereo";
+        }
+        if (channels == 6) {
+            return "5.1";
+        }
+        if (channels == 8) {
+            return "7.1";
+        }
+        return channels + " channels";
+    }
+
+    private String cleanTrackText(String value) {
+        if (value == null) {
+            return null;
+        }
+        String cleaned = value.trim();
+        return cleaned.isEmpty() ? null : cleaned;
+    }
+
+    private void resumeChromeTimeout() {
+        if (isActivePlayerPlaying()) {
+            hideChromeSoon();
+        }
+    }
+
+    private static final class Media3AudioChoice {
+        final Tracks.Group group;
+        final int trackIndex;
+        final String label;
+
+        Media3AudioChoice(Tracks.Group group, int trackIndex, String label) {
+            this.group = group;
+            this.trackIndex = trackIndex;
+            this.label = label;
+        }
+    }
+
     private void playPending() {
+        saveActivePlaybackPosition();
         stopPlayers();
+        activePlaybackKey = playbackKey(pendingUri);
+        long resumePosition = loadActivePlaybackPosition();
+        lastPositionSaveElapsedMs = SystemClock.elapsedRealtime();
+        if (resumePosition >= MIN_RESUME_POSITION_MS) {
+            showResumeDialog(resumePosition);
+        } else {
+            startSelectedMedia(0L);
+        }
+    }
+
+    private void showResumeDialog(long resumePosition) {
+        showChrome();
+        uiHandler.removeCallbacks(hideChromeRunnable);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Resume playback?")
+                .setMessage("Continue from " + formatTime(resumePosition) + " or start from the beginning?")
+                .setNegativeButton("START OVER", (ignored, which) -> {
+                    clearActivePlaybackPosition();
+                    startSelectedMedia(0L);
+                })
+                .setPositiveButton("RESUME", (ignored, which) -> startSelectedMedia(resumePosition))
+                .setCancelable(false)
+                .create();
+        dialog.setOnDismissListener(ignored -> enterImmersiveMode());
+        dialog.show();
+    }
+
+    private void startSelectedMedia(long resumePosition) {
         if (pendingSmbFile != null) {
-            startVlcFallback(0, "SMB network stream");
+            startVlcFallback(resumePosition, "SMB network stream");
             return;
         }
         if (isMatroska(pendingName, pendingUri)) {
-            startVlcFallback(0, "PCM fallback for MKV audio");
+            startVlcFallback(resumePosition, "PCM fallback for MKV audio");
             return;
         }
         usingVlc = false;
         vlcSurface.setVisibility(View.GONE);
         playerView.setVisibility(View.VISIBLE);
-        exoPlayer.setMediaItem(MediaItem.fromUri(pendingUri));
+        exoPlayer.setMediaItem(MediaItem.fromUri(pendingUri), resumePosition);
         exoPlayer.prepare();
         exoPlayer.play();
+        showResumeToast(resumePosition);
         hideChromeSoon();
         updateStatus("Media3 active");
     }
@@ -527,7 +804,7 @@ public final class MainActivity extends Activity {
         if (pendingUri == null) {
             return;
         }
-        long resumePosition = Math.max(startPositionMs, exoPlayer.getCurrentPosition());
+        long resumePosition = Math.max(0L, startPositionMs);
         exoPlayer.stop();
         ensureVlc();
         usingVlc = true;
@@ -586,15 +863,15 @@ public final class MainActivity extends Activity {
             applyPackedAspectFromMetadata();
         }
         vlcPlayer.setAudioDigitalOutputEnabled(false);
+        boolean willResume = pendingVlcPosition >= MIN_RESUME_POSITION_MS;
         vlcPlayer.play();
         hideChromeSoon();
-        if (pendingVlcPosition > 0) {
-            vlcPlayer.setTime(pendingVlcPosition);
-        }
         updateStatus("VLC: " + pendingVlcReason);
-        Toast.makeText(this,
-                pendingSmbFile != null ? "Streaming from SMB" : "Compatible audio enabled (VLC/PCM)",
-                Toast.LENGTH_SHORT).show();
+        if (!willResume) {
+            Toast.makeText(this,
+                    pendingSmbFile != null ? "Streaming from SMB" : "Compatible audio enabled (VLC/PCM)",
+                    Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void ensureVlc() {
@@ -609,6 +886,12 @@ public final class MainActivity extends Activity {
         vlcPlayer.setEventListener(event -> {
             if (event.type == MediaPlayer.Event.Playing) {
                 runOnUiThread(() -> {
+                    long resumePosition = pendingVlcPosition;
+                    pendingVlcPosition = 0L;
+                    if (resumePosition >= MIN_RESUME_POSITION_MS) {
+                        vlcPlayer.setTime(resumePosition);
+                        showResumeToast(resumePosition);
+                    }
                     IMedia.VideoTrack videoTrack = vlcPlayer.getCurrentVideoTrack();
                     if (videoTrack != null) {
                         Log.i(TAG, "Active VLC video track: "
@@ -619,6 +902,8 @@ public final class MainActivity extends Activity {
                     updateStatus("VLC active, PCM audio");
                     hideChromeSoon();
                 });
+            } else if (event.type == MediaPlayer.Event.EndReached) {
+                runOnUiThread(this::clearActivePlaybackPosition);
             } else if (event.type == MediaPlayer.Event.EncounteredError) {
                 runOnUiThread(() -> {
                     updateStatus("LibVLC error");
@@ -724,6 +1009,7 @@ public final class MainActivity extends Activity {
     }
 
     private void pauseActivePlayer() {
+        saveActivePlaybackPosition();
         if (usingVlc && vlcPlayer != null && vlcPlayer.isPlaying()) {
             vlcPlayer.pause();
         } else if (exoPlayer != null) {
@@ -739,6 +1025,65 @@ public final class MainActivity extends Activity {
             playOrResume();
         }
         updatePlayPauseControl();
+    }
+
+    private void saveActivePlaybackPosition() {
+        if (activePlaybackKey == null) {
+            return;
+        }
+        long position = getPlaybackPosition();
+        long duration = getPlaybackDuration();
+        SharedPreferences.Editor editor = getSharedPreferences(PLAYBACK_PREFS, MODE_PRIVATE).edit();
+        if (position < MIN_RESUME_POSITION_MS
+                || (duration > 0L && duration - position <= COMPLETION_MARGIN_MS)) {
+            editor.remove(activePlaybackKey);
+        } else {
+            editor.putLong(activePlaybackKey, position);
+        }
+        editor.apply();
+        lastPositionSaveElapsedMs = SystemClock.elapsedRealtime();
+    }
+
+    private long loadActivePlaybackPosition() {
+        if (activePlaybackKey == null) {
+            return 0L;
+        }
+        long position = getSharedPreferences(PLAYBACK_PREFS, MODE_PRIVATE)
+                .getLong(activePlaybackKey, 0L);
+        return position >= MIN_RESUME_POSITION_MS ? position : 0L;
+    }
+
+    private void clearActivePlaybackPosition() {
+        if (activePlaybackKey == null) {
+            return;
+        }
+        getSharedPreferences(PLAYBACK_PREFS, MODE_PRIVATE)
+                .edit()
+                .remove(activePlaybackKey)
+                .apply();
+        lastPositionSaveElapsedMs = SystemClock.elapsedRealtime();
+        Log.i(TAG, "Cleared completed playback position");
+    }
+
+    private String playbackKey(Uri uri) {
+        String identity = uri == null ? "" : uri.toString();
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(identity.getBytes(StandardCharsets.UTF_8));
+            StringBuilder key = new StringBuilder("media_");
+            for (byte value : digest) {
+                key.append(String.format(Locale.US, "%02x", value & 0xFF));
+            }
+            return key.toString();
+        } catch (NoSuchAlgorithmException impossible) {
+            return "media_" + Integer.toHexString(identity.hashCode());
+        }
+    }
+
+    private void showResumeToast(long positionMs) {
+        if (positionMs >= MIN_RESUME_POSITION_MS) {
+            Toast.makeText(this, "Resuming at " + formatTime(positionMs), Toast.LENGTH_SHORT).show();
+        }
     }
 
     private boolean isActivePlayerPlaying() {
@@ -822,6 +1167,11 @@ public final class MainActivity extends Activity {
             durationTimeView.setText("00:00");
         }
         updatePlayPauseControl();
+        long elapsed = SystemClock.elapsedRealtime();
+        if (isActivePlayerPlaying()
+                && elapsed - lastPositionSaveElapsedMs >= POSITION_SAVE_INTERVAL_MS) {
+            saveActivePlaybackPosition();
+        }
     }
 
     private void updateTimeForProgress(int progress) {
@@ -901,7 +1251,7 @@ public final class MainActivity extends Activity {
         if (statusView == null) {
             return;
         }
-        statusView.setText("v1.1.0 | " + state
+        statusView.setText("v1.1.4 | " + state
                 + " | " + surfaceWidth + "x" + surfaceHeight
                 + " | 3DFV");
         if (titleView != null) {

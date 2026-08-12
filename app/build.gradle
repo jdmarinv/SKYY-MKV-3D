@@ -10,8 +10,8 @@ android {
         applicationId "com.iqh3d.geoexplorer"
         minSdk 26
         targetSdk 28
-        versionCode 22
-        versionName "1.1.0"
+        versionCode 26
+        versionName "1.1.4"
 
         ndk {
             abiFilters "armeabi-v7a"

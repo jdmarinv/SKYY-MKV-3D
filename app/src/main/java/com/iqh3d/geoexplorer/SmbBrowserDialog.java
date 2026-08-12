@@ -5,8 +5,11 @@ import android.app.AlertDialog;
 import android.app.ProgressDialog;
 import android.content.SharedPreferences;
 import android.net.Uri;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
 import android.text.InputType;
 import android.util.Log;
+import android.util.Base64;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.CheckBox;
@@ -27,6 +30,9 @@ import com.hierynomus.smbj.session.Session;
 import com.hierynomus.smbj.share.DiskShare;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -36,8 +42,18 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
+
 final class SmbBrowserDialog {
     private static final String TAG = "SkyySmbBrowser";
+    private static final String KEYSTORE = "AndroidKeyStore";
+    private static final String PASSWORD_KEY_ALIAS = "skyy_smb_password_key";
+    private static final String PASSWORD_CIPHER = "AES/GCM/NoPadding";
+    private static final String PREF_PASSWORD_DATA = "password_data";
+    private static final String PREF_PASSWORD_IV = "password_iv";
 
     interface Listener {
         void onFileSelected(SmbFile file);
@@ -112,7 +128,9 @@ final class SmbBrowserDialog {
         EditText share = field(form, "Shared folder", preferences.getString("share", ""), false);
         EditText path = field(form, "Starting path (optional)", preferences.getString("path", ""), false);
         EditText username = field(form, "Username", preferences.getString("username", ""), false);
-        EditText password = field(form, "Password", "", true);
+        char[] savedPassword = loadPassword(preferences);
+        EditText password = field(form, "Password", new String(savedPassword), true);
+        Arrays.fill(savedPassword, '\0');
         EditText domain = field(form, "Domain / workgroup", preferences.getString("domain", "WORKGROUP"), false);
         CheckBox anonymous = new CheckBox(activity);
         anonymous.setText("Anonymous access");
@@ -159,6 +177,11 @@ final class SmbBrowserDialog {
                             .putString("domain", connection.domain)
                             .putBoolean("anonymous", connection.anonymous)
                             .apply();
+                    if (connection.anonymous) {
+                        clearSavedPassword(preferences);
+                    } else {
+                        savePassword(preferences, connection.password);
+                    }
                     dialog.dismiss();
                     browse(connection, connection.path);
                 }));
@@ -192,6 +215,80 @@ final class SmbBrowserDialog {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
         return input;
+    }
+
+    private void savePassword(SharedPreferences preferences, char[] password) {
+        if (password.length == 0) {
+            clearSavedPassword(preferences);
+            return;
+        }
+        byte[] plaintext = new String(password).getBytes(StandardCharsets.UTF_8);
+        try {
+            Cipher cipher = Cipher.getInstance(PASSWORD_CIPHER);
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreatePasswordKey());
+            byte[] encrypted = cipher.doFinal(plaintext);
+            preferences.edit()
+                    .putString(PREF_PASSWORD_DATA, Base64.encodeToString(encrypted, Base64.NO_WRAP))
+                    .putString(PREF_PASSWORD_IV, Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP))
+                    .apply();
+        } catch (GeneralSecurityException | IOException error) {
+            Log.e(TAG, "Could not encrypt the saved SMB password", error);
+            clearSavedPassword(preferences);
+            activity.runOnUiThread(() -> Toast.makeText(activity,
+                    "Connected, but the password could not be saved securely", Toast.LENGTH_LONG).show());
+        } finally {
+            Arrays.fill(plaintext, (byte) 0);
+        }
+    }
+
+    private char[] loadPassword(SharedPreferences preferences) {
+        String encodedData = preferences.getString(PREF_PASSWORD_DATA, null);
+        String encodedIv = preferences.getString(PREF_PASSWORD_IV, null);
+        if (encodedData == null || encodedIv == null) {
+            return new char[0];
+        }
+        byte[] plaintext = null;
+        try {
+            Cipher cipher = Cipher.getInstance(PASSWORD_CIPHER);
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreatePasswordKey(),
+                    new GCMParameterSpec(128, Base64.decode(encodedIv, Base64.NO_WRAP)));
+            plaintext = cipher.doFinal(Base64.decode(encodedData, Base64.NO_WRAP));
+            return new String(plaintext, StandardCharsets.UTF_8).toCharArray();
+        } catch (GeneralSecurityException | IOException | IllegalArgumentException error) {
+            Log.w(TAG, "Saved SMB password could not be decrypted; clearing it", error);
+            clearSavedPassword(preferences);
+            return new char[0];
+        } finally {
+            if (plaintext != null) {
+                Arrays.fill(plaintext, (byte) 0);
+            }
+        }
+    }
+
+    private SecretKey getOrCreatePasswordKey() throws GeneralSecurityException, IOException {
+        KeyStore keyStore = KeyStore.getInstance(KEYSTORE);
+        keyStore.load(null);
+        SecretKey existing = (SecretKey) keyStore.getKey(PASSWORD_KEY_ALIAS, null);
+        if (existing != null) {
+            return existing;
+        }
+        KeyGenerator keyGenerator = KeyGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_AES, KEYSTORE);
+        keyGenerator.init(new KeyGenParameterSpec.Builder(
+                PASSWORD_KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setRandomizedEncryptionRequired(true)
+                .build());
+        return keyGenerator.generateKey();
+    }
+
+    private void clearSavedPassword(SharedPreferences preferences) {
+        preferences.edit()
+                .remove(PREF_PASSWORD_DATA)
+                .remove(PREF_PASSWORD_IV)
+                .apply();
     }
 
     private void browse(ConnectionInfo connection, String path) {
