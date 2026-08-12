@@ -41,6 +41,7 @@ import androidx.media3.ui.PlayerView;
 import org.videolan.libvlc.LibVLC;
 import org.videolan.libvlc.Media;
 import org.videolan.libvlc.MediaPlayer;
+import org.videolan.libvlc.interfaces.IMedia;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -74,6 +75,7 @@ public final class MainActivity extends Activity {
     };
 
     private Uri pendingUri;
+    private SmbBrowserDialog.SmbFile pendingSmbFile;
     private String pendingName = "No file selected";
     private boolean usingVlc;
     private boolean vlcPlaybackPending;
@@ -225,11 +227,13 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView open = createTextControl("OPEN", 13f, v -> pickVideo());
+        TextView network = createTextControl("SMB", 13f, v -> openSmbBrowser());
         TextView audio = createTextControl("AUDIO", 13f, v -> Toast.makeText(this,
                 usingVlc ? "VLC/PCM audio active" : "Media3 audio active", Toast.LENGTH_SHORT).show());
         TextView mode = createTextControl("3D", 13f, v -> Toast.makeText(this,
                 "Use the 3DFV selector on the left edge", Toast.LENGTH_SHORT).show());
         topBar.addView(open, new LinearLayout.LayoutParams(dp(88), dp(54)));
+        topBar.addView(network, new LinearLayout.LayoutParams(dp(72), dp(54)));
         topBar.addView(audio, new LinearLayout.LayoutParams(dp(88), dp(54)));
         topBar.addView(mode, new LinearLayout.LayoutParams(dp(64), dp(54)));
 
@@ -421,6 +425,10 @@ public final class MainActivity extends Activity {
             exoPlayer.release();
         }
         releaseVlc();
+        if (pendingSmbFile != null) {
+            pendingSmbFile.clearPassword();
+            pendingSmbFile = null;
+        }
         super.onDestroy();
     }
 
@@ -441,7 +449,26 @@ public final class MainActivity extends Activity {
             Log.w(TAG, "The provider does not allow persistent read permission");
         }
         pendingUri = uri;
+        if (pendingSmbFile != null) {
+            pendingSmbFile.clearPassword();
+            pendingSmbFile = null;
+        }
         pendingName = queryDisplayName(uri);
+        playPending();
+    }
+
+    private void openSmbBrowser() {
+        showChrome();
+        new SmbBrowserDialog(this, this::playSmbFile).show();
+    }
+
+    private void playSmbFile(SmbBrowserDialog.SmbFile file) {
+        if (pendingSmbFile != null) {
+            pendingSmbFile.clearPassword();
+        }
+        pendingSmbFile = file;
+        pendingUri = file.uri();
+        pendingName = file.displayName();
         playPending();
     }
 
@@ -478,6 +505,10 @@ public final class MainActivity extends Activity {
 
     private void playPending() {
         stopPlayers();
+        if (pendingSmbFile != null) {
+            startVlcFallback(0, "SMB network stream");
+            return;
+        }
         if (isMatroska(pendingName, pendingUri)) {
             startVlcFallback(0, "PCM fallback for MKV audio");
             return;
@@ -516,21 +547,33 @@ public final class MainActivity extends Activity {
         vlcPlaybackPending = false;
         attachVlcSurface();
 
+        Media media;
         closeVlcInput();
-        try {
-            vlcInput = getContentResolver().openFileDescriptor(pendingUri, "r");
-        } catch (IOException | SecurityException error) {
-            Log.e(TAG, "Could not open the MKV file descriptor", error);
-            updateStatus("No permission to open the MKV");
-            Toast.makeText(this, "Could not open the selected file", Toast.LENGTH_LONG).show();
-            return;
+        if (pendingSmbFile != null) {
+            media = new Media(libVlc, pendingUri);
+            if (!pendingSmbFile.username.isEmpty()) {
+                media.addOption(":smb-user=" + pendingSmbFile.username);
+                media.addOption(":smb-pwd=" + pendingSmbFile.passwordOption());
+                if (!pendingSmbFile.domain.isEmpty()) {
+                    media.addOption(":smb-domain=" + pendingSmbFile.domain);
+                }
+            }
+            media.addOption(":network-caching=3000");
+        } else {
+            try {
+                vlcInput = getContentResolver().openFileDescriptor(pendingUri, "r");
+            } catch (IOException | SecurityException error) {
+                Log.e(TAG, "Could not open the MKV file descriptor", error);
+                updateStatus("No permission to open the MKV");
+                Toast.makeText(this, "Could not open the selected file", Toast.LENGTH_LONG).show();
+                return;
+            }
+            if (vlcInput == null) {
+                updateStatus("Empty file descriptor");
+                return;
+            }
+            media = new Media(libVlc, vlcInput.getFileDescriptor());
         }
-        if (vlcInput == null) {
-            updateStatus("Empty file descriptor");
-            return;
-        }
-
-        Media media = new Media(libVlc, vlcInput.getFileDescriptor());
         appliedPackedAspect = null;
         vlcPlayer.setAspectRatio(null);
         vlcPlayer.setScale(0f);
@@ -539,7 +582,9 @@ public final class MainActivity extends Activity {
         media.addOption(":audio-replay-gain-mode=none");
         vlcPlayer.setMedia(media);
         media.release();
-        applyPackedAspectFromMetadata();
+        if (pendingSmbFile == null) {
+            applyPackedAspectFromMetadata();
+        }
         vlcPlayer.setAudioDigitalOutputEnabled(false);
         vlcPlayer.play();
         hideChromeSoon();
@@ -547,7 +592,9 @@ public final class MainActivity extends Activity {
             vlcPlayer.setTime(pendingVlcPosition);
         }
         updateStatus("VLC: " + pendingVlcReason);
-        Toast.makeText(this, "Compatible audio enabled (VLC/PCM)", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this,
+                pendingSmbFile != null ? "Streaming from SMB" : "Compatible audio enabled (VLC/PCM)",
+                Toast.LENGTH_SHORT).show();
     }
 
     private void ensureVlc() {
@@ -562,6 +609,13 @@ public final class MainActivity extends Activity {
         vlcPlayer.setEventListener(event -> {
             if (event.type == MediaPlayer.Event.Playing) {
                 runOnUiThread(() -> {
+                    IMedia.VideoTrack videoTrack = vlcPlayer.getCurrentVideoTrack();
+                    if (videoTrack != null) {
+                        Log.i(TAG, "Active VLC video track: "
+                                + videoTrack.width + "x" + videoTrack.height);
+                        adjustPackedStereoAspect(videoTrack.width, videoTrack.height,
+                                videoTrack.sarNum, videoTrack.sarDen);
+                    }
                     updateStatus("VLC active, PCM audio");
                     hideChromeSoon();
                 });
@@ -847,7 +901,7 @@ public final class MainActivity extends Activity {
         if (statusView == null) {
             return;
         }
-        statusView.setText("v1.0.0 | " + state
+        statusView.setText("v1.1.0 | " + state
                 + " | " + surfaceWidth + "x" + surfaceHeight
                 + " | 3DFV");
         if (titleView != null) {

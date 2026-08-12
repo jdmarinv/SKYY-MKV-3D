@@ -1,164 +1,198 @@
 <div align="center">
   <img src="docs/skyy-logo.svg" width="128" alt="SKYY MKV 3D logo">
   <h1>SKYY MKV 3D</h1>
-  <p>Reproductor Android de MKV y video estereoscopico para la tablet IQH3D SKYY.</p>
+  <p>An MKV, stereoscopic video, and SMB network player for the IQH3D SKYY tablet.</p>
 </div>
 
-## Descripcion
+## Overview
 
-SKYY MKV 3D es un reproductor Android disenado especificamente para la tablet autostereoscopica IQH3D SKYY. Reproduce video sobre un `SurfaceView` real, conserva el buffer nativo de la pantalla y delega el procesamiento lenticular y el seguimiento ocular al servicio original WZTech 3DFV incluido en el firmware.
+SKYY MKV 3D is an Android player built specifically for the IQH3D SKYY autostereoscopic tablet. It renders video through a real `SurfaceView`, preserves the tablet's native landscape buffer, and delegates lenticular processing, parallax adjustment, and eye tracking to the original WZTech 3DFV service included in the firmware.
 
-El proyecto no recrea el interlazado lenticular, no reemplaza `com.wztech.service3d` y no utiliza el actualizador HTTP heredado del servicio.
+The application does not recreate lenticular interlacing, replace `com.wztech.service3d`, clear its data, or use its legacy HTTP updater.
 
-La version documentada es `1.0.0` (`versionCode 21`). La interfaz del reproductor esta en ingles.
+The current version is `1.1.0` (`versionCode 22`). The application and this documentation are entirely in English.
 
-## Resultado
+## Features
 
-- Reproduccion MKV mediante LibVLC con salida de audio PCM.
-- Reproduccion de otros contenedores mediante AndroidX Media3/ExoPlayer.
-- Fallback real para AC3, E-AC3 y otros audios MKV que Media3 o el firmware no reproducen.
-- `SurfaceView` de pantalla completa en landscape.
-- Buffer validado de `2560x1600` en la tablet fisica.
-- Integracion con el selector flotante nativo de 3DFV.
-- Modos nativos disponibles: Normal, Half SBS, Full SBS y Top/Bottom.
-- Ajuste de paralaje proporcionado por 3DFV.
-- Normalizacion de Full-SBS para evitar imagen pequena, angosta o escalada dos veces.
-- Barra de progreso, tiempo actual, duracion, pausa, avance y retroceso de 10 segundos.
-- Controles inspirados en la ergonomia de MX Player Pro, sin reutilizar codigo ni recursos de MX Player.
-- APK ARM32 para `armeabi-v7a`.
+- MKV playback through LibVLC with decoded PCM audio output.
+- Media3/ExoPlayer playback for supported non-MKV local files.
+- A real fallback for AC3, E-AC3, DTS, and other MKV audio tracks unsupported by the firmware decoder.
+- SMB2/SMB3 browsing and network playback from shared folders.
+- Authenticated and anonymous SMB connections.
+- Fullscreen landscape playback through a real `SurfaceView`.
+- A native `2560x1600` SurfaceView buffer on the physical tablet.
+- Integration with the floating 3DFV selector supplied by the SKYY firmware.
+- Native 3DFV modes: Normal, Half SBS, Full SBS, and Top/Bottom.
+- Native 3DFV parallax adjustment and eye tracking.
+- Full-SBS normalization to prevent a small, narrow, or double-scaled image.
+- Timeline, elapsed time, duration, pause, play, and 10-second seek controls.
+- Controls inspired by the ergonomics of MX Player Pro, using only original code and assets.
+- ARM32 output for `armeabi-v7a`.
 
-## Hardware y firmware validados
+## Validated Device
 
-| Propiedad | Valor observado |
+| Property | Observed value |
 | --- | --- |
-| Dispositivo | IQH3D SKYY |
+| Device | IQH3D SKYY |
 | Android | 8.0 |
-| Resolucion fisica reportada | `1600x2560` |
-| Resolucion landscape usada | `2560x1600` |
-| Servicio 3D | `com.wztech.service3d` |
-| Version 3DFV | `3.5.201812182` |
-| ABI objetivo | `armeabi-v7a` |
-| Activity del reproductor | `com.iqh3d.geoexplorer.MainActivity` |
+| Physical resolution reported by Android | `1600x2560` |
+| Landscape playback resolution | `2560x1600` |
+| 3D service package | `com.wztech.service3d` |
+| 3DFV version | `3.5.201812182` |
+| Target ABI | `armeabi-v7a` |
+| Application package | `com.iqh3d.geoexplorer` |
+| Player Activity | `com.iqh3d.geoexplorer.MainActivity` |
 
-## Arquitectura
+## Architecture
 
 ```mermaid
 flowchart TD
-    A[Selector de archivos de Android] --> B{Contenedor MKV}
+    A[Android file picker] --> B{Local MKV}
     B -->|No| C[Media3 / ExoPlayer]
-    B -->|Si| D[LibVLC]
-    C --> E[SurfaceView Media3]
+    B -->|Yes| D[LibVLC]
+    C --> E[Media3 SurfaceView]
     D --> F[ParcelFileDescriptor]
-    F --> G[Decodificacion de video y audio PCM]
-    G --> H[SurfaceView VLC]
-    E --> I[Buffer 2560x1600]
-    H --> I
-    I --> J[Servicio nativo WZTech 3DFV]
-    J --> K[Panel Normal / Half / Full / Top-Bottom]
-    J --> L[Interlazado lenticular y seguimiento ocular]
+    F --> G[Video decode and PCM audio]
+    G --> H[VLC SurfaceView]
+    I[SMB connection form] --> J[SMBJ browser]
+    J --> K[Safe smb URI and in-memory credentials]
+    K --> D
+    E --> L[Native 2560x1600 buffer]
+    H --> L
+    L --> M[WZTech 3DFV service]
+    M --> N[Normal / Half / Full / Top-Bottom selector]
+    M --> O[Lenticular output, parallax, and eye tracking]
 ```
 
-### Componentes principales
+### Main Components
 
-| Componente | Responsabilidad |
+| Component | Responsibility |
 | --- | --- |
-| `MainActivity` | Ciclo de vida, selector de archivos, controles y coordinacion de motores. |
-| Media3 `1.4.1` | Reproduccion principal de formatos no MKV. |
-| LibVLC `3.6.5` | Reproduccion MKV y fallback de audio PCM. |
-| `SurfaceView` | Superficie real reconocible por SurfaceFlinger y 3DFV. |
-| 3DFV | Selector nativo, transformacion 3D, paralaje y seguimiento ocular. |
+| `MainActivity` | Activity lifecycle, local file picker, controls, playback engine selection, and native surface management. |
+| `SmbBrowserDialog` | SMB connection form, SMB2/SMB3 directory browsing, video filtering, and credential lifecycle. |
+| Media3 `1.4.1` | Playback engine for supported non-MKV local files. |
+| LibVLC `3.6.5` | MKV playback, SMB streaming, video decoding, and PCM audio fallback. |
+| SMBJ `0.13.0` | SMB2/SMB3 authentication and directory browsing. |
+| `SurfaceView` | A real compositor surface visible to SurfaceFlinger and recognizable by 3DFV. |
+| WZTech 3DFV | Native mode selector, stereoscopic transformation, parallax, lenticular output, and eye tracking. |
 
-## Por que se usan dos motores
+## Why Two Playback Engines Are Used
 
-Media3 ofrece una integracion Android limpia, pero en este firmware algunos MKV con AC3 o E-AC3 producian video sin audio. MX Player Pro instalado en la tablet tambien informo que E-AC3 no estaba soportado.
+Media3 provides a clean Android playback path, but the SKYY firmware cannot decode every audio format commonly found in MKV files. During physical testing, some AC3 and E-AC3 files produced video without audio. MX Player Pro on the same tablet also reported unsupported E-AC3 audio.
 
-El fallback inicial no fue suficiente porque abrir directamente una URI `content://` desde LibVLC fallo en el dispositivo. La solucion estable fue:
+The reliable local MKV path is:
 
-1. Abrir la URI seleccionada con `ContentResolver.openFileDescriptor()`.
-2. Mantener vivo el `ParcelFileDescriptor` durante la reproduccion.
-3. Crear el objeto `Media` de LibVLC desde el descriptor nativo.
-4. Desactivar passthrough con `:no-audio-passthrough`.
-5. Desactivar salida digital y entregar PCM al `AudioTrack` de Android.
+1. Open the selected `content://` URI with `ContentResolver.openFileDescriptor()`.
+2. Keep the `ParcelFileDescriptor` alive for the complete playback session.
+3. Construct LibVLC `Media` from the native file descriptor.
+4. Disable encoded passthrough with `:no-audio-passthrough`.
+5. Disable digital output and send decoded PCM to Android `AudioTrack`.
 
-Todos los MKV se envian actualmente a LibVLC para que el comportamiento de audio sea predecible. Los demas contenedores comienzan en Media3.
+All local MKV files are sent directly to LibVLC so their audio behavior is predictable. Supported non-MKV files start in Media3.
 
-## Integracion con 3DFV
+## Native 3DFV Integration
 
-### Activity registrada
+### Detected Activity
 
 ```text
 com.iqh3d.geoexplorer.MainActivity
 ```
 
-### Entrada de whitelist
+### Proposed and Installed Whitelist Entry
 
 ```text
 30@com.iqh3d.geoexplorer.MainActivity
 ```
 
-El prefijo `30@` replica el tipo de entrada utilizado por Chrome en el firmware. Este tipo permite que aparezca el selector nativo en lugar de forzar un modo estereoscopico fijo.
+The `30@` prefix matches the entry type used by Chrome in this firmware. This entry type allows the native selector to appear instead of forcing one stereoscopic source mode.
 
-### Ruta real de configuracion
+### Active Configuration Path
 
-Aunque algunas variantes del firmware documentan `white_list2.config`, en la tablet validada el archivo activo es oculto:
+Some SKYY firmware variants use this documented path:
+
+```text
+/sdcard/K3DX/config/white_list2.config
+```
+
+The physical tablet tested for this project uses the hidden file below as its active configuration:
 
 ```text
 /sdcard/K3DX/config/.white_list2.config
 ```
 
-### Respaldo obligatorio
+Always inspect the directory and confirm the active file before modifying either path:
 
-Antes de modificar la whitelist:
+```bash
+adb shell ls -la /sdcard/K3DX/config/
+```
+
+### Mandatory Backup
+
+Back up the active file before making any change:
 
 ```bash
 STAMP=$(date +%Y%m%d-%H%M%S)
+SOURCE="/sdcard/K3DX/config/.white_list2.config"
 BACKUP="/sdcard/K3DX/config/.white_list2.config.bak.$STAMP"
-adb shell cp /sdcard/K3DX/config/.white_list2.config "$BACKUP"
+adb shell cp "$SOURCE" "$BACKUP"
 adb shell ls -l "$BACKUP"
 ```
 
-Agregar la Activity una sola vez:
+If inspection shows that the non-hidden file is active, use these exact paths instead:
+
+```bash
+STAMP=$(date +%Y%m%d-%H%M%S)
+SOURCE="/sdcard/K3DX/config/white_list2.config"
+BACKUP="/sdcard/K3DX/config/white_list2.config.bak.$STAMP"
+adb shell cp "$SOURCE" "$BACKUP"
+adb shell ls -l "$BACKUP"
+```
+
+### Register the Activity
+
+Append the entry only if it is not already present:
 
 ```bash
 ENTRY='30@com.iqh3d.geoexplorer.MainActivity'
-adb shell "grep -qx '$ENTRY' /sdcard/K3DX/config/.white_list2.config || printf '%s\r\n' '$ENTRY' >> /sdcard/K3DX/config/.white_list2.config"
-adb shell tail -10 /sdcard/K3DX/config/.white_list2.config
+SOURCE='/sdcard/K3DX/config/.white_list2.config'
+adb shell "grep -qx '$ENTRY' '$SOURCE' || printf '%s\r\n' '$ENTRY' >> '$SOURCE'"
+adb shell tail -10 "$SOURCE"
 ```
 
-Recargar el servicio para que vuelva a leer la whitelist:
+Reload the service so it reads the updated whitelist:
 
 ```bash
 adb shell am stopservice -n com.wztech.service3d/.Service3D
 adb shell am startservice -a com.wztech.service -p com.wztech.service3d
 ```
 
-Este procedimiento detiene e inicia el servicio. No desinstala el paquete, no borra datos y no reemplaza su APK.
+This procedure only stops and starts the service. It does not uninstall the package, replace its APK, or erase its data.
 
-### Por que no se registra un SourceType fijo
+### Why Fixed SourceType Registration Is Avoided
 
-El protocolo dinamico de 3DFV permite enviar un `SourceType` positivo. En esta tablet eso activa directamente un modo y puede ocultar el selector Normal/Half/Full/Top-Bottom. El reproductor no realiza ese registro automatico porque el objetivo es conservar el panel flotante nativo.
+The dynamic 3DFV protocol accepts a positive `SourceType`. On this tablet, sending a fixed source type can activate a mode immediately and hide the native Normal/Half/Full/Top-Bottom selector.
 
-La Activity se reconoce mediante whitelist y el usuario elige el modo en 3DFV.
+The player intentionally avoids automatic fixed-SourceType registration. The Activity is recognized through the whitelist, and the user chooses the packing mode through the original 3DFV panel.
 
-## Superficie y resolucion
+## SurfaceView and Native Resolution
 
-3DFV necesita una superficie componible real. Un `TextureView` o una vista Android convencional puede reproducir imagen, pero no ofrece el mismo comportamiento al middleware del firmware.
+3DFV needs a real compositor surface. A `TextureView` or ordinary Android view can display a picture, but it does not expose the same firmware integration behavior.
 
-El proyecto usa:
+The player uses:
 
-- `PlayerView` de Media3 configurado para producir `SurfaceView`.
-- Un segundo `SurfaceView` dedicado a LibVLC.
-- Una sola superficie visible a la vez.
-- `setWindowSize()` para sincronizar LibVLC con el tamano real.
-- Reconexion de `VLCVout` cuando Android destruye y recrea la superficie.
+- A Media3 `PlayerView` configured to produce a `SurfaceView`.
+- A second real `SurfaceView` dedicated to LibVLC.
+- Only one visible playback surface at a time.
+- LibVLC `setWindowSize()` synchronization with the current physical surface.
+- `VLCVout` reattachment when Android destroys and recreates the VLC surface.
 
-No se configura un buffer de `5120` pixeles. En SKYY ese enfoque puede provocar escalado doble y producir una imagen estrecha. El buffer esperado es siempre:
+The player does not request a 5120-pixel-wide buffer. That causes double scaling on this firmware and can produce a narrow picture. The required native landscape buffer is:
 
 ```text
 2560x1600
 ```
 
-Verificacion por logs:
+Verify it with:
 
 ```bash
 adb logcat -c
@@ -166,58 +200,111 @@ adb shell am start -n com.iqh3d.geoexplorer/.MainActivity
 adb logcat | grep -E 'SurfaceView created|SurfaceView buffer/layout'
 ```
 
-Salida esperada:
+Expected output:
 
 ```text
 SurfaceView buffer/layout: 2560x1600
 ```
 
-Al abrir paneles del sistema o perder modo inmersivo puede aparecer temporalmente `2560x1507`. Al cerrar la superposicion y recuperar fullscreen la superficie vuelve a `2560x1600`.
+Android can temporarily report `2560x1507` while the navigation bar or a system overlay is visible. Closing the overlay and restoring immersive fullscreen returns the surface to `2560x1600`.
 
-## Correccion de Full-SBS
+## Full-SBS Normalization
 
-Un Full-SBS de `3840x1080` contiene dos vistas completas de `1920x1080`. Si el reproductor ajusta el frame empacado completo dentro de la pantalla antes de que 3DFV lo procese, la imagen queda pequena o comprimida.
+A `3840x1080` Full-SBS frame contains two complete `1920x1080` views. If the player fits the packed frame into the display before 3DFV processes it, the final image becomes small or horizontally compressed.
 
-El reproductor inspecciona dimensiones con `MediaMetadataRetriever` y normaliza el aspecto de transporte antes de reproducir:
+For local files, the player reads the encoded dimensions with `MediaMetadataRetriever` and normalizes the transport aspect before playback:
 
 ```text
-Si width / height > 2.75:
+If width / height > 2.75:
     aspectWidth  = width
     aspectHeight = height * 2
 ```
 
-Ejemplos:
+Examples:
 
-| Entrada | Aspecto enviado a VLC |
+| Input | Aspect sent to LibVLC |
 | --- | --- |
 | `3840x1080` Full-SBS | `16:9` |
 | `3840x800` Full-SBS | `12:5` |
 
-Para archivos Full Top/Bottom identificados por nombre se aplica la transformacion inversa:
+A `3840x800` source is 2.40:1 per eye. Correct normalization removes the extremely narrow raw `4.8:1` packed strip. Small top and bottom bars remain on the tablet's 16:10 panel when the original cinema aspect is preserved; removing those bars would require cropping or stretching the picture.
+
+For Full Top/Bottom files identified by their filename, the inverse transport correction is applied:
 
 ```text
 aspectWidth  = width * 2
 aspectHeight = height
 ```
 
-El panel 3DFV realiza despues la expansion y el procesamiento correspondientes al modo seleccionado.
+LibVLC's decoded video layout callback and active video track also supply dimensions during playback. The active-track fallback is especially important for SMB streams, where Android's local metadata retriever cannot inspect the remote file directly and some firmware builds omit the expected layout callback.
 
-## Interfaz
+After normalization, the native 3DFV mode performs the corresponding stereoscopic expansion and lenticular processing.
 
-La interfaz esta escrita en ingles y sigue una estructura familiar para reproductores de tablet:
+## SMB2/SMB3 Network Playback
 
-- Nombre del archivo y estado del motor en la cabecera.
-- Acciones `OPEN`, `AUDIO` y `3D`.
-- Barra de progreso cian.
-- Tiempo actual a la izquierda y duracion a la derecha.
-- Controles `-10`, `PLAY/PAUSE` y `+10`.
-- Acciones `FILE` y `FIT`.
-- Ocultamiento automatico despues de cinco segundos.
-- Toque sobre el video para recuperar los controles.
+Tap `SMB` in the top bar to connect to a network share. The connection form contains:
 
-El icono y la marca son originales de este proyecto. Los controles toman como referencia patrones comunes observados en MX Player Pro, pero no incluyen codigo, imagenes ni recursos extraidos de esa aplicacion.
+- `Server or IP (optional :port)`: a DNS name or IPv4 address, without a required `smb://` prefix. Port 445 is used when no port is specified.
+- `Shared folder`: the SMB share name, not a local filesystem path.
+- `Starting path (optional)`: a folder inside the share.
+- `Username`: the SMB account name.
+- `Password`: used only for the active connection and playback session.
+- `Domain / workgroup`: commonly `WORKGROUP` on home networks.
+- `Anonymous access`: use only when the server explicitly allows anonymous access.
 
-## Estructura del proyecto
+The browser shows folders and supported video files. Selecting a file sends a safe `smb://host/share/path` URI to LibVLC and supplies authentication as LibVLC media options. A three-second network cache is enabled to reduce short Wi-Fi interruptions.
+
+### Supported Network Video Extensions
+
+```text
+.mkv .mp4 .webm .avi .mov .m2ts .ts
+```
+
+### Credential Handling
+
+- The host, share, starting path, username, domain, and anonymous setting are saved for convenience.
+- The password is never written to `SharedPreferences`, logs, the URI, or the repository.
+- Password characters are held in memory only while browsing or playing the selected remote file.
+- Password buffers are cleared when another file is selected, when the dialog closes, or when the Activity is destroyed.
+- The visible URI never embeds `username:password@host`.
+
+SMBJ directory browsing caps anonymous sessions at SMB2.1 because anonymous SMB3 sessions do not provide the session key required for SMB3 key derivation. Authenticated browsing retains SMB3 negotiation, and LibVLC independently negotiates the protocol used for media playback.
+
+### Server Requirements
+
+- Enable SMB2 or SMB3 on the NAS, Windows PC, macOS host, or Samba server.
+- Permit TCP port 445 between the tablet and server.
+- Place both devices on networks that can route to each other.
+- Grant the configured account read access to the share and files.
+- SMB1-only servers are not supported and should not be enabled for this application.
+
+### Example Connections
+
+| Server type | Server or IP | Shared folder | Domain/workgroup |
+| --- | --- | --- | --- |
+| Windows | `192.168.1.20` | `Videos` | Windows domain or `WORKGROUP` |
+| Samba/NAS | `nas.local` | `media` | Usually `WORKGROUP` |
+| macOS File Sharing | Mac IP address | Published share name | Account-specific |
+| Nonstandard port | `192.168.1.30:1445` | `media` | Server-specific |
+
+The application does not perform automatic server or share discovery in version `1.1.0`; enter the server and share explicitly.
+
+## Player Interface
+
+The interface is entirely in English and follows a tablet-oriented media player layout:
+
+- File name and active playback engine in the header.
+- `OPEN`, `SMB`, `AUDIO`, and `3D` actions.
+- Cyan playback timeline.
+- Elapsed time on the left and duration on the right.
+- `-10`, `PLAY/PAUSE`, and `+10` controls.
+- `FILE` and `FIT` actions.
+- Automatic control hiding after five seconds.
+- Tap on the video to restore the controls.
+
+The icon, logo, and implementation are original to this project. The layout references common media-player ergonomics observed in MX Player Pro but contains no extracted MX Player code, images, or resources.
+
+## Project Structure
 
 ```text
 .
@@ -225,7 +312,9 @@ El icono y la marca son originales de este proyecto. Los controles toman como re
 |   |-- build.gradle
 |   `-- src/main/
 |       |-- AndroidManifest.xml
-|       |-- java/com/iqh3d/geoexplorer/MainActivity.java
+|       |-- java/com/iqh3d/geoexplorer/
+|       |   |-- MainActivity.java
+|       |   `-- SmbBrowserDialog.java
 |       `-- res/
 |           |-- drawable/ic_skyy_logo.xml
 |           `-- values/styles.xml
@@ -238,24 +327,24 @@ El icono y la marca son originales de este proyecto. Los controles toman como re
 `-- gradlew.bat
 ```
 
-## Requisitos de compilacion
+## Build Requirements
 
 - JDK 17.
-- Android SDK con `compileSdk 35`.
-- ADB disponible para instalacion y pruebas.
-- Gradle Wrapper incluido, version `8.9`.
+- Android SDK with `compileSdk 35`.
+- ADB for installation and physical testing.
+- Included Gradle Wrapper `8.9`.
 - Android Gradle Plugin `8.7.3`.
 
-Clonar el repositorio:
+Clone the repository:
 
 ```bash
 git clone git@github.com:jdmarinv/SKYY-MKV-3D.git
 cd SKYY-MKV-3D
 ```
 
-Configuracion Android:
+Android configuration:
 
-| Opcion | Valor |
+| Setting | Value |
 | --- | --- |
 | `applicationId` | `com.iqh3d.geoexplorer` |
 | `minSdk` | `26` |
@@ -263,30 +352,30 @@ Configuracion Android:
 | `compileSdk` | `35` |
 | ABI | `armeabi-v7a` |
 
-`targetSdk 28` se conserva deliberadamente por compatibilidad con el firmware Android 8 de la tablet. El warning `ExpiredTargetSdkVersion` se desactiva para el build release local. Esto no implica que el APK cumpla los requisitos actuales de publicacion de Google Play.
+`targetSdk 28` is intentional for compatibility with the tablet's Android 8 firmware. The local release build disables the `ExpiredTargetSdkVersion` warning. This does not mean the APK meets current Google Play publication requirements.
 
-## Compilar
+## Build
 
-Build de desarrollo:
+Development build:
 
 ```bash
 ./gradlew :app:assembleDebug
 ```
 
-Build release usado para la entrega:
+Release build:
 
 ```bash
 ./gradlew :app:assembleRelease
 ```
 
-Salidas:
+Outputs:
 
 ```text
 app/build/outputs/apk/debug/app-debug.apk
 app/build/outputs/apk/release/app-release.apk
 ```
 
-En macOS con Homebrew JDK 17:
+On macOS with Homebrew JDK 17:
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
@@ -294,15 +383,15 @@ export PATH="$JAVA_HOME/bin:$PATH"
 ./gradlew :app:assembleRelease
 ```
 
-## Firma de APK
+## APK Signing
 
-La configuracion actual firma el build `release` con la clave debug local para que pueda actualizar las iteraciones instaladas durante el desarrollo sin desinstalar ni perder estado.
+The current `release` build is signed with the local debug key so development builds can update the installed application without uninstalling it or losing state.
 
-Antes de distribuir comercialmente el reproductor se debe crear un keystore privado, guardarlo fuera del repositorio y configurar Gradle mediante variables de entorno o un archivo local no versionado. No se debe publicar una clave privada en Git.
+Before commercial distribution, create a private release keystore, store it outside the repository, and configure Gradle through environment variables or an untracked local file. Never commit a private signing key.
 
-La APK `1.0.0` validada usa APK Signature Scheme v2.
+The validated `1.1.0` APK uses APK Signature Scheme v2.
 
-## Instalar y abrir
+## Install and Launch
 
 ```bash
 adb devices
@@ -311,140 +400,204 @@ adb shell am force-stop com.iqh3d.geoexplorer
 adb shell am start -n com.iqh3d.geoexplorer/.MainActivity
 ```
 
-Verificar version instalada:
+Verify the installed version:
 
 ```bash
 adb shell dumpsys package com.iqh3d.geoexplorer | grep -E 'versionCode|versionName'
 ```
 
-Resultado esperado:
+Expected result:
 
 ```text
-versionCode=21
-versionName=1.0.0
+versionCode=22
+versionName=1.1.0
 ```
 
-## Validar ABI
+## Validate the ARM32 ABI
 
 ```bash
 unzip -l app/build/outputs/apk/release/app-release.apk | grep 'lib/[^/]*/libvlc.so'
 ```
 
-Resultado esperado:
+Expected result:
 
 ```text
 lib/armeabi-v7a/libvlc.so
 ```
 
-## Plan de pruebas fisicas
+## Physical Test Plan
 
-| Prueba | Resultado esperado |
+| Test | Expected result |
 | --- | --- |
-| MKV 2D + Normal | Imagen 2D completa y audio. |
-| Half-SBS + Half | Fusion estereoscopica sin imagen angosta. |
-| Full-SBS `3840x1080` + Full | Cada ojo conserva aspecto `16:9`; pantalla llena. |
-| Full-SBS `3840x800` + Full | Transporte normalizado a `12:5`. |
-| Top/Bottom + Top-Bottom | Fusion vertical correcta. |
-| MKV AC3/E-AC3 | LibVLC activo y salida PCM audible. |
-| Barra de progreso | Tiempo avanza y el seek cambia posicion. |
-| `-10` y `+10` | Salto limitado entre cero y duracion total. |
-| Auto-ocultado | Controles desaparecen despues de cinco segundos. |
-| Toque sobre video | Controles reaparecen. |
-| Cambio de archivo | Se libera descriptor anterior y se conserva el panel 3DFV. |
-| Fullscreen | Surface vuelve a `2560x1600`. |
-| Salida o pausa | Reproduccion se pausa y no queda audio activo. |
+| 2D MKV + Normal | Full 2D image with audible audio. |
+| Half-SBS + Half SBS | Correct stereoscopic fusion without a narrow image. |
+| Full-SBS `3840x1080` + Full SBS | Each eye retains `16:9`; playback fills the display. |
+| Full-SBS `3840x800` + Full SBS | Transport is normalized to `12:5`. |
+| Top/Bottom + Top/Bottom | Correct vertical stereoscopic fusion. |
+| MKV with AC3/E-AC3 | LibVLC is active and decoded PCM is audible. |
+| Playback timeline | Time advances and dragging the timeline changes position. |
+| `-10` and `+10` | Seek remains between zero and total duration. |
+| Automatic hiding | Controls disappear after five seconds. |
+| Tap video | Controls return. |
+| Change local file | Previous descriptor is released and the 3DFV panel remains available. |
+| Change SMB file | Previous credentials are cleared and the new stream starts. |
+| Authenticated SMB MKV | Browser lists the share; video and audio stream through LibVLC. |
+| Anonymous SMB MKV | Connection works only when the server permits anonymous access. |
+| Enter/exit fullscreen | Surface returns to `2560x1600`. |
+| Exit or pause | Playback pauses and no audio remains active in another application. |
+| 3DFV panel | Native selector shows Normal, Half SBS, Full SBS, Top/Bottom, and parallax. |
+| Eye tracking | Lenticular fusion follows the viewer on the physical display. |
 
-La fusion lenticular y el seguimiento ocular solo pueden confirmarse mirando la pantalla fisica. Una captura ADB muestra los frames empacados, pero no demuestra el efecto optico final.
+Left/right eye swapping is not implemented inside the player in version `1.1.0`. If a file is reversed, correct it at the source or use a firmware mode that provides eye-order control, if available.
 
-## Diagnostico
+Lenticular fusion and eye tracking must be confirmed by looking at the physical screen. An ADB screenshot contains the packed source frame and cannot prove the final optical effect.
 
-### Hay audio pero no video
+### SMB Validation Record
 
-1. Confirmar que el `VLC SurfaceView` fue creado.
-2. Revisar que `VLCVout` se vuelva a adjuntar despues de `surfaceCreated()`.
-3. Confirmar que solo uno de los dos SurfaceView este visible.
+The `1.1.0` release was tested on the physical SKYY tablet against Samba `4.24.5` through an ADB TCP tunnel to isolate the application from local Wi-Fi routing differences.
+
+The validated sequence was:
+
+1. Connect anonymously to an SMB2 share at a nonstandard test port.
+2. Browse the share and list the remote `skyy-eac3-full-sbs-test.mkv` file.
+3. Select the 92 MB remote MKV without downloading it through the Android file picker.
+4. Stream the file directly through LibVLC.
+5. Decode the `3840x800` Full-SBS video, read its active LibVLC track dimensions, and normalize the raw packed frame to `12:5` on the real VLC `SurfaceView`.
+6. Confirm that the playback timeline advances.
+7. Confirm a started Android PCM `AudioTrack` for the E-AC3 audio.
+8. Confirm that the native 3DFV edge control remains present while the player is active.
+
+The ADB tunnel and temporary Samba share were used only for validation and are not required by the application. On a normal LAN, enter the NAS or computer address directly.
+
+## Troubleshooting
+
+### Audio Works but Video Is Black
+
+1. Confirm that the VLC `SurfaceView` was created.
+2. Confirm that `VLCVout` reattaches after `surfaceCreated()`.
+3. Confirm that only one playback SurfaceView is visible.
 
 ```bash
 adb logcat | grep -E 'VLC SurfaceView|VLCVout|SkyyMkvPlayer'
 ```
 
-### Hay video pero no audio
+### Video Works but MKV Audio Is Silent
 
-1. Confirmar que el archivo MKV entro por LibVLC.
-2. Buscar `VLC active, PCM audio` en logcat.
-3. Confirmar que passthrough y salida digital estan desactivados.
-4. Verificar que el descriptor del archivo siga abierto.
+1. Confirm that the MKV entered the LibVLC path.
+2. Look for `VLC active, PCM audio` in logcat.
+3. Confirm that passthrough and digital output are disabled.
+4. Confirm that the local file descriptor remains open.
 
 ```bash
 adb logcat | grep -E 'AudioTrack|AudioFlinger|VLC active|PCM'
 ```
 
-### Full-SBS aparece pequeno
+### Full-SBS Appears Small
 
-Buscar la deteccion de dimensiones y el aspecto normalizado:
+Inspect dimension detection and normalized aspect logs:
 
 ```bash
 adb logcat | grep -E 'Dimensions detected|Full-SBS normalized'
 ```
 
-Para `3840x1080` debe aparecer `16:9`.
+For `3840x1080`, the normalized aspect must be `16:9`.
 
-### No aparece el panel 3DFV
+### SMB Connection Fails
 
-1. Confirmar que la Activity completa este en `.white_list2.config`.
-2. Confirmar que no exista un registro dinamico con `SourceType` fijo.
-3. Recargar el servicio sin borrar sus datos.
-4. Abrir nuevamente la Activity.
+1. Verify that the host and share name are separate and correct.
+2. Verify that the tablet can route to the server IP.
+3. Verify TCP port 445 and SMB2/SMB3 are enabled.
+4. Verify account permissions and the domain/workgroup.
+5. Disable `Anonymous access` unless the server explicitly supports it.
+6. Check Android and LibVLC logs without exposing the password.
+
+```bash
+adb logcat | grep -E 'SMB|smb|VLC|SkyyMkvPlayer'
+```
+
+### SMB Browser Works but Playback Fails
+
+Directory browsing uses SMBJ, while playback uses LibVLC. If listing succeeds but playback fails:
+
+1. Confirm that the selected file extension is supported.
+2. Confirm that the account has read permission for the file, not only list permission for the folder.
+3. Test a smaller MKV to separate network throughput from authentication issues.
+4. Check that the server is not requiring SMB signing or encryption unsupported by the tablet's LibVLC build.
+
+### Native 3DFV Panel Does Not Appear
+
+1. Confirm that the full Activity name exists in the active whitelist.
+2. Confirm that the entry uses the same `30@` type as Chrome.
+3. Confirm that no dynamic fixed `SourceType` registration is active.
+4. Reload the service without deleting its data.
+5. Launch the Activity again.
 
 ```bash
 adb shell grep 'com.iqh3d.geoexplorer.MainActivity' /sdcard/K3DX/config/.white_list2.config
 adb shell dumpsys window windows | grep com.wztech.service3d
 ```
 
-### La superficie reporta `2560x1507`
+### Surface Reports `2560x1507`
 
-Eso ocurre cuando aparece la barra de navegacion o una superposicion toma foco. Cerrar el panel expandido, volver a la Activity y recuperar modo inmersivo. No compensar creando un buffer de `5120`.
+The navigation bar or a system overlay currently owns part of the display. Close the expanded overlay, return to the Activity, and restore immersive mode. Do not compensate by creating a 5120-pixel buffer.
 
-### El selector aparece, pero el 3D no fusiona
+### Selector Appears but 3D Does Not Fuse
 
-El overlay confirma reconocimiento de la Activity, no confirma calibracion optica. Verificar:
+The overlay confirms Activity recognition, not optical calibration. Verify:
 
-- Modo correcto para el packing del archivo.
-- Distancia y posicion de la cabeza.
-- Seguimiento ocular activo en el firmware.
-- Orden izquierda/derecha del contenido.
-- Paralaje conservador cerca de cero.
+- The selected 3DFV mode matches the file packing.
+- The viewer's head is inside the tracking area.
+- Eye tracking is enabled in the firmware.
+- Left/right eye order is correct in the source.
+- Parallax begins near zero and is adjusted conservatively.
 
-## Seguridad y reglas operativas
+## Security and Operational Rules
 
-- No desinstalar `com.wztech.service3d`.
-- No borrar sus datos.
-- No reemplazar su APK.
-- No usar el actualizador HTTP heredado.
-- Respaldar siempre la whitelist antes de modificarla.
-- No publicar APKs del firmware ni contenido multimedia de prueba.
-- No registrar un modo 3D fijo si se necesita el selector nativo.
-- No afirmar que el 3D funciona solo por recibir una respuesta del servicio.
+- Do not uninstall `com.wztech.service3d`.
+- Do not clear its application data.
+- Do not replace its APK.
+- Do not use the legacy 3DFV HTTP updater.
+- Always back up the active whitelist before editing it.
+- Do not register a fixed 3D mode when the native selector is required.
+- Do not publish firmware APKs or copyrighted test media.
+- Do not include SMB passwords in URIs, logs, screenshots, or commits.
+- Do not enable SMB1 to make an old server compatible.
+- Do not claim optical 3D success based only on a service response or ADB screenshot.
 
-## Limitaciones conocidas
+## Known Limitations
 
-- El intercambio L/R no esta implementado dentro del reproductor `1.0.0`.
-- La deteccion Full Top/Bottom depende actualmente de patrones en el nombre del archivo.
-- El panel 3DFV pertenece al firmware y puede tomar foco o mostrar temporalmente la barra de navegacion.
-- La APK de entrega usa firma debug v2; una distribucion publica necesita un keystore de release privado.
-- El proyecto esta optimizado para esta tablet Android 8, no para publicacion general en Google Play.
+- Left/right eye swapping is not implemented inside the player in `1.1.0`.
+- Full Top/Bottom detection currently depends partly on filename patterns.
+- SMB server/share discovery is not implemented; users enter both values explicitly.
+- Remote metadata is available only after LibVLC begins decoding the stream.
+- The 3DFV panel belongs to the firmware and may temporarily reveal the Android navigation bar.
+- The deliverable APK uses a debug v2 signature; public distribution needs a private release keystore.
+- The project targets this Android 8 tablet and is not prepared for general Google Play distribution.
 
-## Historial resumido del desarrollo
+## Development History
 
-1. Se identificaron el package y la Activity del reproductor.
-2. Se inspecciono el servicio `com.wztech.service3d` y su whitelist activa.
-3. Se respaldo la configuracion y se registro la Activity con prefijo `30@`.
-4. Se elimino el registro dinamico fijo que ocultaba el selector nativo.
-5. Se reemplazo el render no reconocido por un `SurfaceView` real.
-6. Se diagnostico el audio MKV silencioso y se agrego LibVLC con PCM.
-7. Se corrigio la apertura `content://` mediante `ParcelFileDescriptor`.
-8. Se corrigio la perdida de video al recrearse el SurfaceView de VLC.
-9. Se normalizo Full-SBS para evitar imagen pequena y compresion doble.
-10. Se agregaron timeline, seek, tiempos y auto-ocultado.
-11. Se estudio la ergonomia de MX Player Pro y se redisenaron los controles en ingles.
-12. Se creo una marca original y se genero la APK ARM32 `1.0.0`.
+1. Identified the player package and full Activity name.
+2. Inspected `com.wztech.service3d` and located the active whitelist.
+3. Backed up the whitelist and registered the Activity with the Chrome-compatible `30@` prefix.
+4. Removed fixed dynamic mode registration that hid the native selector.
+5. Replaced non-recognized rendering with a real `SurfaceView`.
+6. Diagnosed silent MKV audio and added LibVLC PCM output.
+7. Corrected `content://` playback by using a persistent `ParcelFileDescriptor`.
+8. Fixed black video after Android recreated the VLC SurfaceView.
+9. Normalized Full-SBS transport to prevent small or double-compressed output.
+10. Added the timeline, seeking, time labels, and automatic control hiding.
+11. Studied MX Player Pro ergonomics and redesigned the player controls in English.
+12. Created original SKYY MKV 3D branding and an ARM32 APK.
+13. Added SMBJ-based SMB2/SMB3 browsing and LibVLC network playback.
+14. Added in-memory-only SMB password handling and lifecycle cleanup.
+15. Updated the application to `1.1.0` (`versionCode 22`).
+
+## Upstream Projects
+
+- [AndroidX Media3](https://github.com/androidx/media)
+- [VLC for Android and LibVLC](https://github.com/videolan/vlc-android)
+- [SMBJ](https://github.com/hierynomus/smbj)
+
+## License and Third-Party Notices
+
+Review the licenses of Media3, LibVLC, SMBJ, and their transitive dependencies before distributing the APK. This repository does not include proprietary SKYY firmware packages, the WZTech 3DFV APK, MX Player assets, or copyrighted sample movies.
