@@ -93,6 +93,29 @@ All local MKV files are sent directly to LibVLC so their audio behavior is predi
 
 ## Native 3DFV Integration
 
+> **Per-tablet setup is required.** The 3DFV whitelist is firmware data stored on each physical tablet, not inside the APK. Sharing or installing the APK does not transfer this entry to another device.
+
+The repository includes a safe ADB helper that detects the installed Activity and active whitelist, prints the proposed entry and exact backup path, and asks for confirmation before changing anything:
+
+```bash
+./scripts/setup-3dfv-selector.sh --inspect-only
+./scripts/setup-3dfv-selector.sh --apk /path/to/SKYY-MKV-3D-v1.1.4-arm32.apk
+```
+
+If the APK is already installed, omit `--apk`:
+
+```bash
+./scripts/setup-3dfv-selector.sh
+```
+
+The helper only backs up and updates the selected whitelist, restarts `com.wztech.service3d/.Service3D`, and relaunches the player. It never uninstalls, replaces, updates, or clears data from `com.wztech.service3d`.
+
+If both whitelist variants exist and neither can be identified safely, the helper stops without changing them. Inspect the directory and rerun it with the confirmed path, for example the hidden path used by the tablet validated for this project:
+
+```bash
+./scripts/setup-3dfv-selector.sh --config /sdcard/K3DX/config/.white_list2.config
+```
+
 ### Detected Activity
 
 ```text
@@ -410,6 +433,16 @@ The validated `1.1.4` APK uses APK Signature Scheme v2.
 
 ## Install and Launch
 
+For a new tablet, use the provisioning helper so installation and native 3DFV registration happen together:
+
+```bash
+./scripts/setup-3dfv-selector.sh --apk app/build/outputs/apk/release/app-release.apk
+```
+
+This is a one-time step for every physical tablet. A normal reinstall with `adb install -r` preserves the entry once that tablet has been provisioned.
+
+To install without configuring 3DFV:
+
 ```bash
 adb devices
 adb install -r app/build/outputs/apk/release/app-release.apk
@@ -545,6 +578,12 @@ Directory browsing uses SMBJ, while playback uses LibVLC. If listing succeeds bu
 4. Check that the server is not requiring SMB signing or encryption unsupported by the tablet's LibVLC build.
 
 ### Native 3DFV Panel Does Not Appear
+
+The most common cause on a second tablet is that the APK was installed but its device-local whitelist was never provisioned. Diagnose it first:
+
+```bash
+./scripts/setup-3dfv-selector.sh --inspect-only
+```
 
 1. Confirm that the full Activity name exists in the active whitelist.
 2. Confirm that the entry uses the same `30@` type as Chrome.
