@@ -97,6 +97,8 @@ All local MKV files are sent directly to LibVLC so their audio behavior is predi
 
 The repository includes a safe ADB helper that detects the installed Activity and active whitelist, prints the proposed entry and exact backup path, and asks for confirmation before changing anything:
 
+#### macOS and Linux
+
 ```bash
 ./scripts/setup-3dfv-selector.sh --inspect-only
 ./scripts/setup-3dfv-selector.sh --apk /path/to/SKYY-MKV-3D-v1.1.4-arm32.apk
@@ -114,6 +116,28 @@ If both whitelist variants exist and neither can be identified safely, the helpe
 
 ```bash
 ./scripts/setup-3dfv-selector.sh --config /sdcard/K3DX/config/.white_list2.config
+```
+
+#### Windows
+
+Install Android SDK Platform-Tools, make sure `adb.exe` is available on `PATH`, enable USB debugging on the tablet, and authorize the Windows computer. Then open Command Prompt or PowerShell in the repository folder and run:
+
+```powershell
+adb devices
+.\scripts\setup-3dfv-selector.cmd -InspectOnly
+.\scripts\setup-3dfv-selector.cmd
+```
+
+If the APK is not installed yet, configure and install it in one operation:
+
+```powershell
+.\scripts\setup-3dfv-selector.cmd -Apk "C:\Users\YourName\Downloads\SKYY-MKV-3D-v1.1.4-arm32.apk"
+```
+
+The `.cmd` launcher runs the repository's PowerShell helper with a one-process execution-policy bypass; it does not modify the computer's permanent PowerShell policy. If both whitelist files are ambiguous, pass the confirmed path explicitly:
+
+```powershell
+.\scripts\setup-3dfv-selector.cmd -Config "/sdcard/K3DX/config/.white_list2.config"
 ```
 
 ### Detected Activity
@@ -437,6 +461,12 @@ For a new tablet, use the provisioning helper so installation and native 3DFV re
 
 ```bash
 ./scripts/setup-3dfv-selector.sh --apk app/build/outputs/apk/release/app-release.apk
+```
+
+On Windows:
+
+```powershell
+.\scripts\setup-3dfv-selector.cmd -Apk "app\build\outputs\apk\release\app-release.apk"
 ```
 
 This is a one-time step for every physical tablet. A normal reinstall with `adb install -r` preserves the entry once that tablet has been provisioned.
