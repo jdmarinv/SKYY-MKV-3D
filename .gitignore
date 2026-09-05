@@ -20,6 +20,7 @@ captures/
 *.mp4
 *.rar
 *.dmg
+*.zip
 
 # Local research, backups, and unrelated workspaces
 /Movies/
@@ -36,3 +37,13 @@ captures/
 
 # Unused local prototype retained only for historical reference
 /app/src/main/java/com/iqh3d/geoexplorer/StereoShapeView.java
+
+# Keystores and signing artifacts
+*.keystore
+*.idsig
+scripts/uber-apk-signer.jar
+
+# APK modding and inspection workspaces
+/HDWifiCamPro_*/
+/QHIPC_*/
+qhipc_*.png

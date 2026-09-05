@@ -3,6 +3,9 @@ package com.iqh3d.geoexplorer;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.os.Build;
+import android.os.Environment;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.database.Cursor;
@@ -21,11 +24,13 @@ import android.view.Gravity;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -38,6 +43,8 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.Tracks;
+import androidx.media3.common.text.Cue;
+import androidx.media3.common.text.CueGroup;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.ui.AspectRatioFrameLayout;
@@ -48,7 +55,9 @@ import org.videolan.libvlc.Media;
 import org.videolan.libvlc.MediaPlayer;
 import org.videolan.libvlc.interfaces.IMedia;
 
+import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -59,6 +68,7 @@ import java.util.Locale;
 public final class MainActivity extends Activity {
     private static final String TAG = "SkyyMkvPlayer";
     private static final int PICK_VIDEO = 1001;
+    private static final int PICK_SUBTITLE = 1002;
     private static final String PLAYBACK_PREFS = "playback_positions";
     private static final long MIN_RESUME_POSITION_MS = 5_000L;
     private static final long COMPLETION_MARGIN_MS = 15_000L;
@@ -67,6 +77,9 @@ public final class MainActivity extends Activity {
     private PlayerView playerView;
     private ExoPlayer exoPlayer;
     private SurfaceView vlcSurface;
+    private StereoSubtitleView stereoSubtitleView;
+    private SubtitleParser.SubtitleTrack activeSubtitleTrack;
+    private int activeStereoMode = StereoSubtitleView.MODE_2D;
     private LibVLC libVlc;
     private MediaPlayer vlcPlayer;
     private ParcelFileDescriptor vlcInput;
@@ -110,11 +123,42 @@ public final class MainActivity extends Activity {
                 WindowManager.LayoutParams.FLAG_FULLSCREEN);
         enterImmersiveMode();
 
+        getWindow().getDecorView().setOnSystemUiVisibilityChangeListener(visibility -> {
+            if ((visibility & View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) == 0) {
+                uiHandler.removeCallbacks(this::enterImmersiveMode);
+                uiHandler.postDelayed(this::enterImmersiveMode, 1500);
+            }
+        });
+
         buildExoPlayer();
         setContentView(buildLayout());
         configureSurface(playerView.getVideoSurfaceView());
         updateStatus("Ready");
         uiHandler.post(updateProgressRunnable);
+        checkPermissionsAndInitProvisioning();
+    }
+
+    public void enterImmersiveMode() {
+        View decorView = getWindow().getDecorView();
+        decorView.setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+    }
+
+    public void enterImmersiveModePublic() {
+        enterImmersiveMode();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            enterImmersiveMode();
+        }
     }
 
     private void buildExoPlayer() {
@@ -129,6 +173,31 @@ public final class MainActivity extends Activity {
             public void onTracksChanged(Tracks tracks) {
                 if (!usingVlc && !tracks.isTypeSupported(C.TRACK_TYPE_AUDIO)) {
                     startVlcFallback(exoPlayer.getCurrentPosition(), "audio not supported by Media3");
+                }
+                if (!usingVlc && activeSubtitleTrack == null) {
+                    autoSelectMedia3SubtitleIfAvailable(tracks);
+                }
+            }
+
+            @Override
+            public void onCues(@NonNull CueGroup cueGroup) {
+                if (usingVlc) {
+                    return;
+                }
+                // Si no hay archivo de subtítulo externo cargado, usar los subtítulos embebidos de Media3
+                if (activeSubtitleTrack == null && stereoSubtitleView != null) {
+                    if (cueGroup.cues != null && !cueGroup.cues.isEmpty()) {
+                        StringBuilder sb = new StringBuilder();
+                        for (Cue cue : cueGroup.cues) {
+                            if (cue.text != null) {
+                                if (sb.length() > 0) sb.append("\n");
+                                sb.append(cue.text);
+                            }
+                        }
+                        stereoSubtitleView.setExternalCueText(sb.toString());
+                    } else {
+                        stereoSubtitleView.setExternalCueText("");
+                    }
                 }
             }
 
@@ -175,6 +244,10 @@ public final class MainActivity extends Activity {
         playerView.setKeepScreenOn(true);
         playerView.setUseArtwork(false);
         playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FILL);
+        if (playerView.getSubtitleView() != null) {
+            // Ocultar renderizado plano 2D interno de Media3 para dar paso a StereoSubtitleView
+            playerView.getSubtitleView().setVisibility(View.GONE);
+        }
         videoHost.addView(playerView, matchParent());
 
         vlcSurface = new SurfaceView(this);
@@ -207,6 +280,10 @@ public final class MainActivity extends Activity {
             }
         });
         videoHost.addView(vlcSurface, matchParent());
+
+        // Capa de subtítulos estereoscópicos
+        stereoSubtitleView = new StereoSubtitleView(this);
+        root.addView(stereoSubtitleView, matchParent());
 
         View playbackTouchLayer = new View(this);
         playbackTouchLayer.setBackgroundColor(0x00000000);
@@ -251,11 +328,13 @@ public final class MainActivity extends Activity {
         TextView open = createTextControl("OPEN", 13f, v -> pickVideo());
         TextView network = createTextControl("SMB", 13f, v -> openSmbBrowser());
         TextView audio = createTextControl("AUDIO", 13f, v -> showAudioTrackSelector());
+        TextView subs = createTextControl("SUBS", 13f, v -> showSubtitleSelector());
         TextView mode = createTextControl("3D", 13f, v -> Toast.makeText(this,
                 "Use the 3DFV selector on the left edge", Toast.LENGTH_SHORT).show());
         topBar.addView(open, new LinearLayout.LayoutParams(dp(88), dp(54)));
         topBar.addView(network, new LinearLayout.LayoutParams(dp(72), dp(54)));
         topBar.addView(audio, new LinearLayout.LayoutParams(dp(88), dp(54)));
+        topBar.addView(subs, new LinearLayout.LayoutParams(dp(80), dp(54)));
         topBar.addView(mode, new LinearLayout.LayoutParams(dp(64), dp(54)));
 
         FrameLayout.LayoutParams topParams = new FrameLayout.LayoutParams(
@@ -457,26 +536,64 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != PICK_VIDEO || resultCode != RESULT_OK || data == null) {
+        if (resultCode != RESULT_OK || data == null) {
+            enterImmersiveMode();
             return;
         }
-        Uri uri = data.getData();
-        if (uri == null) {
-            return;
+        if (requestCode == PICK_VIDEO) {
+            Uri uri = data.getData();
+            if (uri == null) {
+                return;
+            }
+            try {
+                getContentResolver().takePersistableUriPermission(
+                        uri, data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (SecurityException ignored) {
+                Log.w(TAG, "The provider does not allow persistent read permission");
+            }
+            pendingUri = uri;
+            if (pendingSmbFile != null) {
+                pendingSmbFile.clearPassword();
+                pendingSmbFile = null;
+            }
+            pendingName = queryDisplayName(uri);
+            playPending();
+        } else if (requestCode == PICK_SUBTITLE) {
+            Uri subUri = data.getData();
+            if (subUri != null) {
+                loadExternalSubtitleFromUri(subUri);
+            }
+            enterImmersiveMode();
         }
-        try {
-            getContentResolver().takePersistableUriPermission(
-                    uri, data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        } catch (SecurityException ignored) {
-            Log.w(TAG, "The provider does not allow persistent read permission");
+    }
+
+    private static final int REQUEST_STORAGE_PERMS = 1010;
+
+    private void checkPermissionsAndInitProvisioning() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    == PackageManager.PERMISSION_GRANTED) {
+                ThreeDfvProvisioner.autoProvisionAsync(this);
+            } else {
+                requestPermissions(new String[]{
+                        android.Manifest.permission.READ_EXTERNAL_STORAGE,
+                        android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                }, REQUEST_STORAGE_PERMS);
+            }
+        } else {
+            ThreeDfvProvisioner.autoProvisionAsync(this);
         }
-        pendingUri = uri;
-        if (pendingSmbFile != null) {
-            pendingSmbFile.clearPassword();
-            pendingSmbFile = null;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_STORAGE_PERMS) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                ThreeDfvProvisioner.autoProvisionAsync(this);
+            }
         }
-        pendingName = queryDisplayName(uri);
-        playPending();
+        enterImmersiveMode();
     }
 
     private void openSmbBrowser() {
@@ -491,6 +608,7 @@ public final class MainActivity extends Activity {
         pendingSmbFile = file;
         pendingUri = file.uri();
         pendingName = file.displayName();
+        enterImmersiveMode();
         playPending();
     }
 
@@ -507,6 +625,119 @@ public final class MainActivity extends Activity {
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
                 | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         startActivityForResult(intent, PICK_VIDEO);
+    }
+
+    private void pickSubtitle() {
+        showChrome();
+        uiHandler.removeCallbacks(hideChromeRunnable);
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
+                "text/plain",
+                "application/x-subrip",
+                "text/vtt",
+                "application/octet-stream",
+                "*/*"
+        });
+        startActivityForResult(intent, PICK_SUBTITLE);
+    }
+
+    private void loadExternalSubtitleFromUri(Uri uri) {
+        try (InputStream is = getContentResolver().openInputStream(uri)) {
+            String name = queryDisplayName(uri);
+            activeSubtitleTrack = SubtitleParser.parseStream(is, name);
+            if (activeSubtitleTrack != null && !activeSubtitleTrack.cues.isEmpty()) {
+                applySubtitleMode(activeStereoMode);
+                Toast.makeText(this, "Subtítulo: " + name + " (" + activeSubtitleTrack.cues.size() + " frases)", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "No se encontraron entradas válidas de subtítulos", Toast.LENGTH_SHORT).show();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error cargando archivo de subtítulo", e);
+            Toast.makeText(this, "Error al leer el archivo de subtítulo", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void searchLocalCompanionSubtitle(Uri uri, String name) {
+        if (uri == null || name == null) return;
+        try {
+            File videoFile = resolveFileFromUri(uri);
+            if (videoFile != null && videoFile.exists()) {
+                File parent = videoFile.getParentFile();
+                if (parent != null && parent.exists() && parent.isDirectory()) {
+                    searchInDirectory(parent, name);
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Error buscando subtítulo complementario local", e);
+        }
+    }
+
+    private boolean searchInDirectory(File dir, String name) {
+        File[] siblings = dir.listFiles();
+        if (siblings == null || siblings.length == 0) return false;
+
+        List<SmbBrowserDialog.SmbEntry> videoEntries = new ArrayList<>();
+        List<SmbBrowserDialog.SmbEntry> subEntries = new ArrayList<>();
+
+        for (File f : siblings) {
+            String fName = f.getName().toLowerCase(Locale.US);
+            if (fName.endsWith(".mkv") || fName.endsWith(".mp4") || fName.endsWith(".webm") || fName.endsWith(".avi") || fName.endsWith(".ts")) {
+                videoEntries.add(new SmbBrowserDialog.SmbEntry(f.getName(), f.getAbsolutePath(), false));
+            } else if (fName.endsWith(".srt") || fName.endsWith(".vtt")) {
+                subEntries.add(new SmbBrowserDialog.SmbEntry(f.getName(), f.getAbsolutePath(), false));
+            }
+        }
+
+        SmbBrowserDialog.SmbEntry bestSub = SmbBrowserDialog.findBestMatchingSubtitle(name, videoEntries, subEntries);
+        if (bestSub != null) {
+            File subFile = new File(bestSub.path);
+            if (subFile.exists()) {
+                activeSubtitleTrack = SubtitleParser.parseFile(subFile);
+                if (activeSubtitleTrack != null) {
+                    applySubtitleMode(activeStereoMode);
+                    Toast.makeText(this, "Subtítulo local detectado: " + subFile.getName(), Toast.LENGTH_SHORT).show();
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private File resolveFileFromUri(Uri uri) {
+        if (uri == null) return null;
+        if ("file".equalsIgnoreCase(uri.getScheme()) && uri.getPath() != null) {
+            return new File(uri.getPath());
+        }
+        if ("content".equalsIgnoreCase(uri.getScheme())) {
+            try {
+                if (android.provider.DocumentsContract.isDocumentUri(this, uri)) {
+                    String docId = android.provider.DocumentsContract.getDocumentId(uri);
+                    if (docId != null) {
+                        if (docId.startsWith("primary:")) {
+                            return new File(Environment.getExternalStorageDirectory(), docId.substring("primary:".length()));
+                        } else if (docId.startsWith("raw:")) {
+                            return new File(docId.substring("raw:".length()));
+                        }
+                    }
+                }
+                String[] projection = { android.provider.MediaStore.Video.Media.DATA };
+                try (Cursor cursor = getContentResolver().query(uri, projection, null, null, null)) {
+                    if (cursor != null && cursor.moveToFirst()) {
+                        int index = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Video.Media.DATA);
+                        String path = cursor.getString(index);
+                        if (path != null) return new File(path);
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    private static String stripExtension(String fileName) {
+        int dot = fileName.lastIndexOf('.');
+        return dot > 0 ? fileName.substring(0, dot) : fileName;
     }
 
     private void playOrResume() {
@@ -577,7 +808,10 @@ public final class MainActivity extends Activity {
                     }
                     dialog.dismiss();
                 }));
-        dialog.setOnDismissListener(ignored -> resumeChromeTimeout());
+        dialog.setOnDismissListener(ignored -> {
+            enterImmersiveMode();
+            resumeChromeTimeout();
+        });
         dialog.show();
     }
 
@@ -654,13 +888,16 @@ public final class MainActivity extends Activity {
                     exoPlayer.setTrackSelectionParameters(exoPlayer.getTrackSelectionParameters()
                             .buildUpon()
                             .setOverrideForType(new TrackSelectionOverride(
-                                    choice.group.getMediaTrackGroup(), choice.trackIndex))
+                                     choice.group.getMediaTrackGroup(), choice.trackIndex))
                             .build());
                     Toast.makeText(this, "Audio: " + choice.label, Toast.LENGTH_SHORT).show();
                     Log.i(TAG, "Selected Media3 audio track: " + choice.label);
                     dialog.dismiss();
                 }));
-        dialog.setOnDismissListener(ignored -> resumeChromeTimeout());
+        dialog.setOnDismissListener(ignored -> {
+            enterImmersiveMode();
+            resumeChromeTimeout();
+        });
         dialog.show();
     }
 
@@ -750,9 +987,553 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void showSubtitleSelector() {
+        showChrome();
+        uiHandler.removeCallbacks(hideChromeRunnable);
+
+        final AlertDialog[] dialogHolder = new AlertDialog[1];
+
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(dp(22), dp(12), dp(22), dp(16));
+        layout.setBackgroundColor(0xFF0C131A);
+
+        // 1. Pista activa
+        layout.addView(createSectionTitle("PISTA DE SUBTÍTULOS ACTIVA"));
+        TextView trackStatus = new TextView(this);
+        trackStatus.setTextColor(0xFF54E0C7);
+        trackStatus.setTextSize(14f);
+        trackStatus.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        trackStatus.setPadding(0, dp(4), 0, dp(10));
+
+        String currentTrackName = "(Desactivado / Ninguno)";
+        if (activeSubtitleTrack != null) {
+            currentTrackName = "✓ Externo: " + activeSubtitleTrack.name + " (" + activeSubtitleTrack.cues.size() + " frases)";
+        } else if (usingVlc && vlcPlayer != null) {
+            int currentSpu = vlcPlayer.getSpuTrack();
+            if (currentSpu != -1) {
+                MediaPlayer.TrackDescription[] tracks = vlcPlayer.getSpuTracks();
+                if (tracks != null) {
+                    for (MediaPlayer.TrackDescription td : tracks) {
+                        if (td.id == currentSpu) {
+                            currentTrackName = "✓ Video (VLC): " + td.name;
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if (!usingVlc && exoPlayer != null) {
+            for (Tracks.Group group : exoPlayer.getCurrentTracks().getGroups()) {
+                if (group.getType() == C.TRACK_TYPE_TEXT && group.isSelected()) {
+                    for (int i = 0; i < group.length; i++) {
+                        if (group.isTrackSelected(i)) {
+                            Format fmt = group.getTrackFormat(i);
+                            currentTrackName = "✓ Video (Media3): " + buildMedia3TextLabel(fmt, i);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        trackStatus.setText(currentTrackName);
+        layout.addView(trackStatus);
+
+        // Subtítulos incorporados en el video (MKV / MP4)
+        if (usingVlc && vlcPlayer != null) {
+            MediaPlayer.TrackDescription[] spuTracks = vlcPlayer.getSpuTracks();
+            if (spuTracks != null && spuTracks.length > 0) {
+                layout.addView(createSectionTitle("SUBTÍTULOS INCORPORADOS EN EL VIDEO"));
+                LinearLayout spuLayout = new LinearLayout(this);
+                spuLayout.setOrientation(LinearLayout.VERTICAL);
+                int currentSpu = (activeSubtitleTrack != null) ? -1 : vlcPlayer.getSpuTrack();
+
+                for (MediaPlayer.TrackDescription td : spuTracks) {
+                    boolean isSelected = (currentSpu == td.id);
+                    TextView btn = createSelectableButton(td.name, isSelected);
+                    btn.setOnClickListener(v -> {
+                        vlcPlayer.setSpuTrack(td.id);
+                        activeSubtitleTrack = null;
+                        stereoSubtitleView.clear();
+                        trackStatus.setText(td.id == -1 ? "(Desactivado)" : "✓ Video: " + td.name);
+                        Toast.makeText(this, "Subtítulo: " + td.name, Toast.LENGTH_SHORT).show();
+                        if (dialogHolder[0] != null) dialogHolder[0].dismiss();
+                    });
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, dp(40));
+                    lp.setMargins(0, 0, 0, dp(6));
+                    spuLayout.addView(btn, lp);
+                }
+                layout.addView(spuLayout);
+            }
+        } else if (!usingVlc && exoPlayer != null) {
+            List<Media3TextChoice> choices = getMedia3TextChoices();
+            if (!choices.isEmpty()) {
+                layout.addView(createSectionTitle("SUBTÍTULOS INCORPORADOS EN EL VIDEO"));
+                LinearLayout textLayout = new LinearLayout(this);
+                textLayout.setOrientation(LinearLayout.VERTICAL);
+
+                boolean noneSelected = (activeSubtitleTrack != null) || !isAnyMedia3TextSelected();
+                TextView btnNone = createSelectableButton("Desactivado", noneSelected);
+                btnNone.setOnClickListener(v -> {
+                    exoPlayer.setTrackSelectionParameters(exoPlayer.getTrackSelectionParameters()
+                            .buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build());
+                    activeSubtitleTrack = null;
+                    stereoSubtitleView.clear();
+                    trackStatus.setText("(Desactivado)");
+                    if (dialogHolder[0] != null) dialogHolder[0].dismiss();
+                });
+                LinearLayout.LayoutParams lpNone = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(40));
+                lpNone.setMargins(0, 0, 0, dp(6));
+                textLayout.addView(btnNone, lpNone);
+
+                for (Media3TextChoice choice : choices) {
+                    boolean isSelected = (activeSubtitleTrack == null && choice.isSelected);
+                    TextView btn = createSelectableButton(choice.label, isSelected);
+                    btn.setOnClickListener(v -> {
+                        exoPlayer.setTrackSelectionParameters(exoPlayer.getTrackSelectionParameters()
+                                .buildUpon()
+                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                                .setOverrideForType(new TrackSelectionOverride(choice.group.getMediaTrackGroup(), choice.trackIndex))
+                                .build());
+                        activeSubtitleTrack = null;
+                        trackStatus.setText("✓ Video: " + choice.label);
+                        Toast.makeText(this, "Subtítulo: " + choice.label, Toast.LENGTH_SHORT).show();
+                        if (dialogHolder[0] != null) dialogHolder[0].dismiss();
+                    });
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, dp(40));
+                    lp.setMargins(0, 0, 0, dp(6));
+                    textLayout.addView(btn, lp);
+                }
+                layout.addView(textLayout);
+            }
+        }
+
+        // Subtítulo externo
+        layout.addView(createSectionTitle("SUBTÍTULO EXTERNO (.SRT / .VTT)"));
+        LinearLayout trackButtons = new LinearLayout(this);
+        trackButtons.setOrientation(LinearLayout.HORIZONTAL);
+        TextView btnPick = createDialogActionButton("CARGAR ARCHIVO EXTERNO", v -> {
+            if (dialogHolder[0] != null) dialogHolder[0].dismiss();
+            pickSubtitle();
+        });
+        TextView btnOff = createDialogActionButton("DESACTIVAR TODO", v -> {
+            activeSubtitleTrack = null;
+            stereoSubtitleView.clear();
+            if (usingVlc && vlcPlayer != null) {
+                vlcPlayer.setSpuTrack(-1);
+            } else if (!usingVlc && exoPlayer != null) {
+                exoPlayer.setTrackSelectionParameters(exoPlayer.getTrackSelectionParameters()
+                        .buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build());
+            }
+            trackStatus.setText("(Desactivado)");
+            Toast.makeText(this, "Subtítulos desactivados", Toast.LENGTH_SHORT).show();
+            if (dialogHolder[0] != null) dialogHolder[0].dismiss();
+        });
+        trackButtons.addView(btnPick, new LinearLayout.LayoutParams(0, dp(44), 1f));
+        trackButtons.addView(btnOff, new LinearLayout.LayoutParams(dp(150), dp(44)));
+        layout.addView(trackButtons);
+
+        // 2. Modo 3D
+        layout.addView(createSectionTitle("MODO DE VISUALIZACIÓN DE SUBTÍTULOS"));
+        LinearLayout modeRow = new LinearLayout(this);
+        modeRow.setOrientation(LinearLayout.HORIZONTAL);
+        String[] modeLabels = {"2D (Centrado)", "3D SBS (En video)"};
+        int[] modeValues = {
+                StereoSubtitleView.MODE_2D,
+                StereoSubtitleView.MODE_SBS
+        };
+        for (int i = 0; i < modeLabels.length; i++) {
+            final int m = modeValues[i];
+            final String lbl = modeLabels[i];
+            TextView btnMode = createSelectableButton(lbl, activeStereoMode == m);
+            btnMode.setOnClickListener(v -> {
+                applySubtitleMode(m);
+                updateSelectableRow(modeRow, btnMode);
+            });
+            modeRow.addView(btnMode, spacedParam());
+        }
+        layout.addView(modeRow);
+
+        // 3. Profundidad 3D / Paralaje (Para modo 3D SBS)
+        layout.addView(createSectionTitle("PROFUNDIDAD 3D / PARALAJE"));
+        LinearLayout parallaxRow = new LinearLayout(this);
+        parallaxRow.setOrientation(LinearLayout.HORIZONTAL);
+        parallaxRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView pMinus = createDialogActionButton("–", null);
+        TextView pLabel = new TextView(this);
+        pLabel.setTextColor(0xFFFFFFFF);
+        pLabel.setTextSize(14f);
+        pLabel.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        pLabel.setGravity(Gravity.CENTER);
+        pLabel.setText(formatParallaxText(stereoSubtitleView.getParallaxOffsetPx()));
+        TextView pPlus = createDialogActionButton("+", null);
+
+        pMinus.setOnClickListener(v -> {
+            int current = stereoSubtitleView.getParallaxOffsetPx() - 4;
+            stereoSubtitleView.setParallaxOffsetPx(current);
+            pLabel.setText(formatParallaxText(current));
+            if (activeStereoMode == StereoSubtitleView.MODE_SBS) {
+                applySubtitleMode(StereoSubtitleView.MODE_SBS);
+            }
+        });
+        pPlus.setOnClickListener(v -> {
+            int current = stereoSubtitleView.getParallaxOffsetPx() + 4;
+            stereoSubtitleView.setParallaxOffsetPx(current);
+            pLabel.setText(formatParallaxText(current));
+            if (activeStereoMode == StereoSubtitleView.MODE_SBS) {
+                applySubtitleMode(StereoSubtitleView.MODE_SBS);
+            }
+        });
+
+        parallaxRow.addView(pMinus, new LinearLayout.LayoutParams(dp(54), dp(40)));
+        parallaxRow.addView(pLabel, new LinearLayout.LayoutParams(0, dp(40), 1f));
+        parallaxRow.addView(pPlus, new LinearLayout.LayoutParams(dp(54), dp(40)));
+        layout.addView(parallaxRow);
+
+        // 4. Tamaño de texto
+        layout.addView(createSectionTitle("TAMAÑO DE TEXTO"));
+        LinearLayout sizeRow = new LinearLayout(this);
+        sizeRow.setOrientation(LinearLayout.HORIZONTAL);
+        float[] sizeValues = {16f, 20f, 25f, 30f};
+        String[] sizeLabels = {"Pequeño", "Normal", "Grande", "Extra"};
+        for (int i = 0; i < sizeValues.length; i++) {
+            final float sz = sizeValues[i];
+            TextView btnSize = createSelectableButton(sizeLabels[i], Math.abs(stereoSubtitleView.getTextSizeSp() - sz) < 1f);
+            btnSize.setOnClickListener(v -> {
+                stereoSubtitleView.setTextSizeSp(sz);
+                updateSelectableRow(sizeRow, btnSize);
+                if (activeStereoMode == StereoSubtitleView.MODE_SBS) {
+                    applySubtitleMode(StereoSubtitleView.MODE_SBS);
+                }
+            });
+            sizeRow.addView(btnSize, spacedParam());
+        }
+        layout.addView(sizeRow);
+
+        // 5. Sincronización / Retraso
+        layout.addView(createSectionTitle("SINCRONIZACIÓN / RETRASO"));
+        LinearLayout syncRow = new LinearLayout(this);
+        syncRow.setOrientation(LinearLayout.HORIZONTAL);
+        syncRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView sMinus = createDialogActionButton("–0.5s", null);
+        TextView sLabel = new TextView(this);
+        sLabel.setTextColor(0xFFFFFFFF);
+        sLabel.setTextSize(14f);
+        sLabel.setGravity(Gravity.CENTER);
+        sLabel.setText(formatSyncText(stereoSubtitleView.getSyncOffsetMs()));
+        TextView sPlus = createDialogActionButton("+0.5s", null);
+        TextView sReset = createDialogActionButton("0s", null);
+
+        sMinus.setOnClickListener(v -> {
+            long newSync = stereoSubtitleView.getSyncOffsetMs() - 500L;
+            stereoSubtitleView.setSyncOffsetMs(newSync);
+            sLabel.setText(formatSyncText(newSync));
+        });
+        sPlus.setOnClickListener(v -> {
+            long newSync = stereoSubtitleView.getSyncOffsetMs() + 500L;
+            stereoSubtitleView.setSyncOffsetMs(newSync);
+            sLabel.setText(formatSyncText(newSync));
+        });
+        sReset.setOnClickListener(v -> {
+            stereoSubtitleView.setSyncOffsetMs(0L);
+            sLabel.setText(formatSyncText(0L));
+        });
+
+        syncRow.addView(sMinus, new LinearLayout.LayoutParams(dp(72), dp(40)));
+        syncRow.addView(sLabel, new LinearLayout.LayoutParams(0, dp(40), 1f));
+        syncRow.addView(sPlus, new LinearLayout.LayoutParams(dp(72), dp(40)));
+        syncRow.addView(sReset, new LinearLayout.LayoutParams(dp(54), dp(40)));
+        layout.addView(syncRow);
+
+        ScrollView scrollView = new ScrollView(this);
+        scrollView.addView(layout);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Subtítulos")
+                .setView(scrollView)
+                .setPositiveButton("LISTO", (d, w) -> resumeChromeTimeout())
+                .create();
+        dialogHolder[0] = dialog;
+
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setFlags(
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE);
+        }
+        dialog.setOnDismissListener(ignored -> {
+            enterImmersiveMode();
+            resumeChromeTimeout();
+        });
+        dialog.show();
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().getDecorView().setSystemUiVisibility(
+                    getWindow().getDecorView().getSystemUiVisibility());
+            dialog.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE);
+        }
+    }
+
+    private void applySubtitleMode(int mode) {
+        activeStereoMode = mode;
+        if (mode == StereoSubtitleView.MODE_SBS) {
+            if (usingVlc && vlcPlayer != null && activeSubtitleTrack != null) {
+                int vw = 1920;
+                int vh = 1080;
+                IMedia.VideoTrack vt = vlcPlayer.getCurrentVideoTrack();
+                if (vt != null && vt.width > 0 && vt.height > 0) {
+                    vw = vt.width;
+                    vh = vt.height;
+                } else if (vlcSurface != null && vlcSurface.getWidth() > 0) {
+                    vw = vlcSurface.getWidth();
+                    vh = vlcSurface.getHeight();
+                }
+                File ass = SubtitleParser.generateSbsAssFile(
+                        getCacheDir(),
+                        activeSubtitleTrack,
+                        vw,
+                        vh,
+                        stereoSubtitleView.getParallaxOffsetPx(),
+                        stereoSubtitleView.getTextSizeSp());
+                if (ass != null && ass.exists()) {
+                    boolean ok = vlcPlayer.addSlave(IMedia.Slave.Type.Subtitle, Uri.fromFile(ass), true);
+                    stereoSubtitleView.clear();
+                    Toast.makeText(this, ok ? "Subtítulo 3D SBS integrado en video (3D real)" : "Error al agregar subtítulo a VLC", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+            } else if (activeSubtitleTrack != null) {
+                Toast.makeText(this, "Modo 3D SBS requiere reproducción en VLC", Toast.LENGTH_SHORT).show();
+            }
+        }
+
+        // Modo 2D (Centrado en plano nítido) o fallback
+        if (usingVlc && vlcPlayer != null) {
+            vlcPlayer.setSpuTrack(-1);
+        }
+        stereoSubtitleView.setMode(StereoSubtitleView.MODE_2D);
+        if (activeSubtitleTrack != null) {
+            stereoSubtitleView.setSubtitleTrack(activeSubtitleTrack);
+        }
+    }
+
+    private static final class Media3TextChoice {
+        final Tracks.Group group;
+        final int trackIndex;
+        final String label;
+        final boolean isSelected;
+
+        Media3TextChoice(Tracks.Group group, int trackIndex, String label, boolean isSelected) {
+            this.group = group;
+            this.trackIndex = trackIndex;
+            this.label = label;
+            this.isSelected = isSelected;
+        }
+    }
+
+    private List<Media3TextChoice> getMedia3TextChoices() {
+        List<Media3TextChoice> choices = new ArrayList<>();
+        if (exoPlayer == null) return choices;
+        for (Tracks.Group group : exoPlayer.getCurrentTracks().getGroups()) {
+            if (group.getType() != C.TRACK_TYPE_TEXT) continue;
+            for (int i = 0; i < group.length; i++) {
+                if (!group.isTrackSupported(i)) continue;
+                Format format = group.getTrackFormat(i);
+                String label = buildMedia3TextLabel(format, choices.size());
+                choices.add(new Media3TextChoice(group, i, label, group.isTrackSelected(i)));
+            }
+        }
+        return choices;
+    }
+
+    private String buildMedia3TextLabel(Format format, int index) {
+        String name = cleanTrackText(format.label);
+        if (name == null) {
+            name = "Pista " + (index + 1);
+        }
+        String lang = displayLanguage(format.language);
+        return lang != null ? (name + " (" + lang + ")") : name;
+    }
+
+    private boolean isAnyMedia3TextSelected() {
+        if (exoPlayer == null) return false;
+        for (Tracks.Group group : exoPlayer.getCurrentTracks().getGroups()) {
+            if (group.getType() == C.TRACK_TYPE_TEXT && group.isSelected()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void autoSelectVlcSubtitleIfAvailable() {
+        if (vlcPlayer == null || activeSubtitleTrack != null) return;
+        MediaPlayer.TrackDescription[] tracks = vlcPlayer.getSpuTracks();
+        if (tracks == null || tracks.length <= 1) return;
+
+        int currentTrack = vlcPlayer.getSpuTrack();
+        if (currentTrack != -1) return;
+
+        int targetId = -1;
+        String targetName = null;
+        for (MediaPlayer.TrackDescription td : tracks) {
+            if (td.id == -1) continue;
+            String lower = td.name.toLowerCase(Locale.US);
+            if (lower.contains("spanish") || lower.contains("español") || lower.contains("spa")
+                    || lower.contains("[es]") || lower.contains("es-") || lower.contains("latino")) {
+                targetId = td.id;
+                targetName = td.name;
+                break;
+            }
+        }
+        if (targetId == -1) {
+            // Si no hay español, tomar la primera pista válida
+            for (MediaPlayer.TrackDescription td : tracks) {
+                if (td.id != -1) {
+                    targetId = td.id;
+                    targetName = td.name;
+                    break;
+                }
+            }
+        }
+        if (targetId != -1) {
+            vlcPlayer.setSpuTrack(targetId);
+            Toast.makeText(this, "Subtítulo detectado: " + targetName, Toast.LENGTH_SHORT).show();
+            Log.i(TAG, "Subtítulo VLC detectado y activado: " + targetName + " (id=" + targetId + ")");
+        }
+    }
+
+    private void autoSelectMedia3SubtitleIfAvailable(Tracks tracks) {
+        if (tracks == null || activeSubtitleTrack != null || exoPlayer == null) return;
+        for (Tracks.Group group : tracks.getGroups()) {
+            if (group.getType() == C.TRACK_TYPE_TEXT && group.isSelected()) {
+                return;
+            }
+        }
+        for (Tracks.Group group : tracks.getGroups()) {
+            if (group.getType() != C.TRACK_TYPE_TEXT) continue;
+            for (int i = 0; i < group.length; i++) {
+                if (!group.isTrackSupported(i)) continue;
+                Format format = group.getTrackFormat(i);
+                String lang = format.language != null ? format.language.toLowerCase(Locale.US) : "";
+                String label = format.label != null ? format.label.toLowerCase(Locale.US) : "";
+                if (lang.contains("es") || lang.contains("spa") || label.contains("spanish")
+                        || label.contains("español") || label.contains("latino")) {
+                    exoPlayer.setTrackSelectionParameters(exoPlayer.getTrackSelectionParameters()
+                            .buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                            .setOverrideForType(new TrackSelectionOverride(group.getMediaTrackGroup(), i))
+                            .build());
+                    String name = format.label != null ? format.label : "Español";
+                    Toast.makeText(this, "Subtítulo detectado: " + name, Toast.LENGTH_SHORT).show();
+                    return;
+                }
+            }
+        }
+    }
+
+    private TextView createSectionTitle(String title) {
+        TextView tv = new TextView(this);
+        tv.setText(title);
+        tv.setTextColor(0xFF8899A6);
+        tv.setTextSize(11f);
+        tv.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        tv.setPadding(0, dp(14), 0, dp(6));
+        return tv;
+    }
+
+    private TextView createDialogActionButton(String text, View.OnClickListener listener) {
+        TextView btn = new TextView(this);
+        btn.setText(text);
+        btn.setTextColor(0xFFFFFFFF);
+        btn.setTextSize(12f);
+        btn.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        btn.setGravity(Gravity.CENTER);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xCC1E293B);
+        bg.setCornerRadius(dp(8));
+        bg.setStroke(dp(1), 0x4454E0C7);
+        btn.setBackground(bg);
+        btn.setOnClickListener(listener);
+        return btn;
+    }
+
+    private TextView createSelectableButton(String text, boolean selected) {
+        TextView btn = new TextView(this);
+        btn.setText(text);
+        btn.setTextSize(12f);
+        btn.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        btn.setGravity(Gravity.CENTER);
+        styleSelectableButton(btn, selected);
+        return btn;
+    }
+
+    private void styleSelectableButton(TextView btn, boolean selected) {
+        GradientDrawable bg = new GradientDrawable();
+        if (selected) {
+            bg.setColor(0xFF20726F);
+            bg.setStroke(dp(2), 0xFF54E0C7);
+            btn.setTextColor(0xFFFFFFFF);
+        } else {
+            bg.setColor(0xCC111822);
+            bg.setStroke(dp(1), 0x33445566);
+            btn.setTextColor(0xFF8899A6);
+        }
+        bg.setCornerRadius(dp(8));
+        btn.setBackground(bg);
+    }
+
+    private void updateSelectableRow(LinearLayout row, TextView selectedBtn) {
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View child = row.getChildAt(i);
+            if (child instanceof TextView) {
+                styleSelectableButton((TextView) child, child == selectedBtn);
+            }
+        }
+    }
+
+    private LinearLayout.LayoutParams spacedParam() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(42), 1f);
+        lp.setMargins(dp(3), 0, dp(3), 0);
+        return lp;
+    }
+
+    private String formatParallaxText(int px) {
+        if (px == 0) return "0 px (En plano)";
+        if (px > 0) return "+" + px + " px (Flotante al frente)";
+        return px + " px (Hacia el fondo)";
+    }
+
+    private String formatSyncText(long ms) {
+        if (ms == 0) return "0.0 s";
+        double s = ms / 1000.0;
+        return String.format(Locale.US, "%+.1f s", s);
+    }
+
     private void playPending() {
+        enterImmersiveMode();
         saveActivePlaybackPosition();
         stopPlayers();
+        if (stereoSubtitleView != null) {
+            stereoSubtitleView.clear();
+            stereoSubtitleView.setVideoHint(pendingName);
+        }
+        if (pendingSmbFile != null) {
+            if (pendingSmbFile.cachedSubtitleFile != null) {
+                activeSubtitleTrack = SubtitleParser.parseFile(pendingSmbFile.cachedSubtitleFile);
+                if (activeSubtitleTrack != null) {
+                    applySubtitleMode(activeStereoMode);
+                    String subName = pendingSmbFile.cachedSubtitleFile.getName().replaceFirst("^smb_sub_\\d+_", "");
+                    Toast.makeText(this, "Subtítulo SMB detectado: " + subName, Toast.LENGTH_SHORT).show();
+                }
+            } else {
+                activeSubtitleTrack = null;
+            }
+        } else {
+            activeSubtitleTrack = null;
+            searchLocalCompanionSubtitle(pendingUri, pendingName);
+        }
+
         activePlaybackKey = playbackKey(pendingUri);
         long resumePosition = loadActivePlaybackPosition();
         lastPositionSaveElapsedMs = SystemClock.elapsedRealtime();
@@ -781,6 +1562,7 @@ public final class MainActivity extends Activity {
     }
 
     private void startSelectedMedia(long resumePosition) {
+        enterImmersiveMode();
         if (pendingSmbFile != null) {
             startVlcFallback(resumePosition, "SMB network stream");
             return;
@@ -801,6 +1583,7 @@ public final class MainActivity extends Activity {
     }
 
     private void startVlcFallback(long startPositionMs, String reason) {
+        enterImmersiveMode();
         if (pendingUri == null) {
             return;
         }
@@ -863,6 +1646,9 @@ public final class MainActivity extends Activity {
             applyPackedAspectFromMetadata();
         }
         vlcPlayer.setAudioDigitalOutputEnabled(false);
+        if (activeSubtitleTrack != null) {
+            vlcPlayer.setSpuTrack(-1);
+        }
         boolean willResume = pendingVlcPosition >= MIN_RESUME_POSITION_MS;
         vlcPlayer.play();
         hideChromeSoon();
@@ -898,6 +1684,11 @@ public final class MainActivity extends Activity {
                                 + videoTrack.width + "x" + videoTrack.height);
                         adjustPackedStereoAspect(videoTrack.width, videoTrack.height,
                                 videoTrack.sarNum, videoTrack.sarDen);
+                    }
+                    if (activeSubtitleTrack != null) {
+                        applySubtitleMode(activeStereoMode);
+                    } else {
+                        autoSelectVlcSubtitleIfAvailable();
                     }
                     updateStatus("VLC active, PCM audio");
                     hideChromeSoon();
@@ -1166,6 +1957,9 @@ public final class MainActivity extends Activity {
             playbackTimeView.setText("00:00");
             durationTimeView.setText("00:00");
         }
+        if (stereoSubtitleView != null) {
+            stereoSubtitleView.updateTime(position);
+        }
         updatePlayPauseControl();
         long elapsed = SystemClock.elapsedRealtime();
         if (isActivePlayerPlaying()
@@ -1259,13 +2053,6 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void enterImmersiveMode() {
-        getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
-    }
-
     private void hideChromeSoon() {
         uiHandler.removeCallbacks(hideChromeRunnable);
         uiHandler.postDelayed(hideChromeRunnable, 5000);
@@ -1298,5 +2085,6 @@ public final class MainActivity extends Activity {
         chrome.setAlpha(0f);
         chrome.setVisibility(View.GONE);
         Log.i(TAG, "Playback controls hidden");
+        enterImmersiveMode();
     }
 }

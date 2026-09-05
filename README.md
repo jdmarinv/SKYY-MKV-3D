@@ -10,15 +10,20 @@ SKYY MKV 3D is an Android player built specifically for the IQH3D SKYY autostere
 
 The application does not recreate lenticular interlacing, replace `com.wztech.service3d`, clear its data, or use its legacy HTTP updater.
 
-The current version is `1.1.4` (`versionCode 26`).
+The current version is `1.1.5` (`versionCode 27`).
 
 ## Features
 
 - MKV playback through LibVLC with decoded PCM audio output.
 - Media3/ExoPlayer playback for supported non-MKV local files.
 - A real fallback for AC3, E-AC3, DTS, and other MKV audio tracks unsupported by the firmware decoder.
-- SMB2/SMB3 browsing and network playback from shared folders.
+- SMB2/SMB3 browsing and network playback from shared folders with modern mosaic (grid) and list view modes.
 - Authenticated and anonymous SMB connections.
+- Stereoscopic 3D subtitles (SBS in-video burning via LibVLC slave with 1:1 anamorphic ratio compensation, and 2D centered overlay).
+- Automatic companion subtitle detection for SMB and local folders with fuzzy title matching.
+- Subtitle synchronization offset adjustment and font size controls.
+- Automatic self-healing 3DFV whitelist registration on first launch (`ThreeDfvProvisioner`).
+- Persistent sticky immersive mode ensuring navigation touchbar remains hidden.
 - Fullscreen landscape playback through a real `SurfaceView`.
 - A native `2560x1600` SurfaceView buffer on the physical tablet.
 - Integration with the floating 3DFV selector supplied by the SKYY firmware.

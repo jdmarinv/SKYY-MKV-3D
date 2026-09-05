@@ -10,8 +10,8 @@ android {
         applicationId "com.iqh3d.geoexplorer"
         minSdk 26
         targetSdk 28
-        versionCode 26
-        versionName "1.1.4"
+        versionCode 27
+        versionName "1.1.5"
 
         ndk {
             abiFilters "armeabi-v7a"
@@ -23,6 +23,10 @@ android {
             minifyEnabled false
             signingConfig signingConfigs.debug
         }
+    }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
     }
 
     lint {
@@ -38,4 +42,5 @@ dependencies {
     implementation 'androidx.media3:media3-common:1.4.1'
     implementation 'com.hierynomus:smbj:0.13.0'
     implementation 'org.videolan.android:libvlc-all:3.6.5'
+    testImplementation 'junit:junit:4.13.2'
 }

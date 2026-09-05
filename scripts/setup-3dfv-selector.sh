@@ -89,7 +89,7 @@ fi
 adb shell pm path "$PACKAGE" >/dev/null 2>&1 || fail "$PACKAGE is not installed"
 adb shell pm path "$SERVICE_PACKAGE" >/dev/null 2>&1 || fail "$SERVICE_PACKAGE is not installed"
 
-if ! adb shell dumpsys package "$PACKAGE" | tr -d '\r' | grep -Fq "$ACTIVITY"; then
+if ! adb shell dumpsys package "$PACKAGE" | tr -d '\r' | grep -E -q "(${ACTIVITY}|${PACKAGE}/\.MainActivity)"; then
     fail "expected Activity was not found in the installed package: $ACTIVITY"
 fi
 
